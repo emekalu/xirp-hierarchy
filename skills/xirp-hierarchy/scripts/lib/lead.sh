@@ -218,25 +218,35 @@ cmd_status() {
   fi
 }
 
+lead_text() { # fyi text
+  if [[ "$1" -eq 1 ]]; then printf '[LEAD FYI] %s%s' "$2" "$FYI_SUFFIX"; else printf '[LEAD] %s%s' "$2" "$ASK_SUFFIX"; fi
+}
+
 cmd_tell() {
-  if [[ "${1:-}" == "--lead" ]]; then LEAD="$2"; shift 2; fi
-  [[ $# -ge 2 ]] || die "usage: tell <worker> \"message\""
-  LEAD="$(resolve_lead "$LEAD")"
+  local fyi=0 args=()
+  while [[ $# -gt 0 ]]; do case "$1" in
+    --lead) LEAD="$2"; shift 2;;  --fyi) fyi=1; shift;;  *) args+=("$1"); shift;; esac; done
+  [[ ${#args[@]} -eq 2 ]] || die "usage: tell <worker> \"message\" [--fyi]"
+  set -- "${args[@]}"
+  LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
   local id; id="$(resolve_worker "$1")"
-  "$XIRP" session message "$id" "[LEAD] $2" --from "$LEAD"
+  "$XIRP" session message "$id" "$(lead_text $fyi "$2")" --from "$LEAD"
   echo "sent to $1 (${id:0:8})"
 }
 
 cmd_broadcast() {
-  if [[ "${1:-}" == "--lead" ]]; then LEAD="$2"; shift 2; fi
-  [[ -n "${1:-}" ]] || die "usage: broadcast \"message\""
-  LEAD="$(resolve_lead "$LEAD")"
-  local id st
+  local fyi=0 args=()
+  while [[ $# -gt 0 ]]; do case "$1" in
+    --lead) LEAD="$2"; shift 2;;  --fyi) fyi=1; shift;;  *) args+=("$1"); shift;; esac; done
+  [[ ${#args[@]} -eq 1 ]] || die "usage: broadcast \"message\" [--fyi]"
+  set -- "${args[@]}"
+  LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
+  local id st text; text="$(lead_text $fyi "$1")"
   while IFS= read -r id; do
     [[ -n "$id" ]] || continue
     st="$(session_json "$id" 2>/dev/null | jq -r '.status' || echo unknown)"
     case "$st" in
-      running|idle|waiting) "$XIRP" session message "$id" "[LEAD] $1" --from "$LEAD" && echo "sent to ${id:0:8}";;
+      running|idle|waiting) "$XIRP" session message "$id" "$text" --from "$LEAD" && echo "sent to ${id:0:8}";;
       *) echo "skipped ${id:0:8} ($st)";;
     esac
   done < <(state -r --argjson a "$ACTIVE" '.tasks[] | select(.status as $s | $a | index($s)) | .id')

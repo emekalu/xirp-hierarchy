@@ -21,6 +21,10 @@ cmd_report() {
     *) die "usage: report READY|QUESTION|BLOCKED|PROGRESS \"text\"";;
   esac
   [[ -n "$text" ]] || die "report: text required"
+  # acknowledgements cost the lead context and attention; they carry no information
+  if [[ "$kind" == PROGRESS ]] && printf '%s' "$text" | grep -Eiq '^[[:space:]]*(ack(nowledged)?|noted|understood|got it|ok(ay)?|thanks?( you)?|will do|holding|waiting)([[:space:][:punct:]]|$)'; then
+    die "report: acknowledgements are not sent to the lead; stay silent until you have a READY/QUESTION/BLOCKED or real progress"
+  fi
   local me="${CHIRP_SESSION_ID:-}"; [[ -n "$me" ]] || die "report must run inside a worker session"
   local sj name branch wt sha="" dirty=""
   sj="$(session_json "$me")"

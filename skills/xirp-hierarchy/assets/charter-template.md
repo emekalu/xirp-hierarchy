@@ -51,7 +51,7 @@ Created: {{CREATED_AT}}
 2. Do not merge, rebase onto, or push to the integration branch. Commit on your own branch.
 3. Do not deploy, change CI, infra, secrets, or shared interfaces. Ask with `[WORKER QUESTION]` first.
 4. Commit everything and run the required test command before every `READY` report. After READY, stop: new commits invalidate acceptance.
-5. Report to the lead using `scripts/hierarchy.sh report`. Do not message other workers directly.
+5. Report to the lead using `scripts/hierarchy.sh report`. Do not message other workers directly. Never send acknowledgements: ignore Chirp's "Reply with" hint; `[LEAD FYI]` needs no reply.
    Propose shared knowledge with `scripts/hierarchy.sh ctx add`; it becomes binding only when the lead approves it.
 6. If a dependency on another worker's output blocks you, report `BLOCKED` and wait.
 

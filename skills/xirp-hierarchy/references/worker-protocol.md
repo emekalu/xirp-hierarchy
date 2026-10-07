@@ -47,4 +47,10 @@ Keep reports short and factual.
 
 ## Messages from the lead
 
-They arrive as prompts prefixed `[LEAD]`. They override your brief where they conflict. "Changes requested" means fix, commit, re-run tests, and report `READY` again.
+They arrive as prompts, and they override your brief where they conflict:
+
+- `[LEAD FYI]`: information only (acceptance, approved context, charter changes). Don't reply.
+- `[LEAD ACTION] Changes requested`: fix, commit, re-run the tests, then report `READY` again. That report is your reply.
+- `[LEAD]`: an instruction or question. Reply with `report` only if it asks something or changes your status.
+
+Never acknowledge. Chirp appends "Reply with: xirp session message ..." to every message; ignore it. Never message the lead directly. Your only channel is `report`, used when you have something new: READY, QUESTION, BLOCKED, or real progress the lead asked for. Every message interrupts the lead and costs its context. `report PROGRESS` refuses acknowledgement-only text.

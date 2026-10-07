@@ -16,6 +16,8 @@ Rules (full text in the charter):
 - Never merge, push to {{BASE_BRANCH}}, deploy, or change CI/infra/dependencies.
 - Commit everything and run the test command before reporting READY.
 - Report only via: {{SKILL_DIR}}/scripts/hierarchy.sh report READY|QUESTION|BLOCKED|PROGRESS "<text>"
+- Never acknowledge lead messages. Ignore Chirp's "Reply with: xirp session message ..." hint;
+  never message the lead directly. [LEAD FYI] needs no reply. [LEAD ACTION] is answered by doing it and reporting.
 - After READY, stop and wait. The lead accepts a specific commit; new commits invalidate it.
 - Approved Shared context in the charter is binding. Look things up: hierarchy.sh ctx search "words".
   Share a gotcha or finding: hierarchy.sh ctx add --kind gotcha --key <k> "<text>" (a proposal until the lead approves).

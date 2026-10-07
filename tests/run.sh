@@ -21,6 +21,7 @@ st() { "$BASH_BIN" "$H" dump --lead "$LEAD_ID" | jq "$@"; }
 DB() { sqlite3 "$XIRP_HIERARCHY_STATE/$LEAD_ID/state.db" "$1"; }
 CH="$T/state/lead-0000-test/charter.md"
 wt_of() { jq -r .worktreePath "$MOCK_DIR/sessions/$1.json"; }
+sess_set() { local f="$MOCK_DIR/sessions/$1.json"; jq "$2" "$f" >"$f.tmp" && mv "$f.tmp" "$f"; }
 commit_in() { (cd "$1" && mkdir -p "$(dirname "$2")" && echo "${3:-x}" >"$2" && git add -A && git commit -qm "edit $2"); }
 
 # repo: tests fail iff a file named FAIL exists
@@ -55,6 +56,13 @@ refuse "spawn without --owns refused" h spawn --name x --goal g --force
 API="$(st -r '.tasks[0].id')"; API2="$(st -r '.tasks[1].id')"
 WT="$(wt_of "$API")"
 
+echo "preflight"
+refuse "preflight fails while workers produce no tokens" h preflight --wait 0
+check "preflight names the stalled worker" bash -c "$BASH_BIN '$H' preflight --wait 0 2>&1 | grep -q 'STALLED  api'"
+sess_set "$API" '.inputTokens=5'; sess_set "$API2" '.outputTokens=5'
+check "preflight ok once all workers produce tokens" h preflight --wait 0
+sess_set "$API" 'del(.inputTokens)'; sess_set "$API2" 'del(.outputTokens)'
+
 echo "concurrent reports (bug 2)"
 for i in $(seq 1 25); do ( CHIRP_SESSION_ID="$API"  h report PROGRESS "a$i" >/dev/null 2>&1 ) & done
 for i in $(seq 1 25); do ( CHIRP_SESSION_ID="$API2" h report PROGRESS "b$i" >/dev/null 2>&1 ) & done
@@ -63,6 +71,22 @@ check "all 50 concurrent reports recorded" st -e '([.tasks[].reports[]]|length)=
 check "state still valid JSON with 2 tasks" st -e '.tasks|length==2'
 refuse "worker cannot accept" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" accept api
 refuse "worker cannot spawn" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" spawn --name z --goal g --owns z
+
+echo "noise control + wait"
+refuse "acknowledgement report refused" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" report PROGRESS "Acknowledged, holding."
+refuse "'ok' report refused" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" report PROGRESS "OK"
+check "real progress allowed (no false positive)" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" report PROGRESS "Okapi parser done"
+check "tell --fyi marks no-reply" bash -c "$BASH_BIN '$H' tell api 'heads up' --fyi && tail -n1 '$MOCK_DIR/messages.log' | grep -q 'LEAD FYI. heads up (FYI: do not reply.)'"
+check "plain tell forbids acknowledgements" bash -c "$BASH_BIN '$H' tell api 'which port?' && tail -n1 '$MOCK_DIR/messages.log' | grep -q 'no acknowledgements'"
+refuse "worker cannot tell" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" tell api2 hi
+check "wait returns unread reports immediately" bash -c "$BASH_BIN '$H' wait --timeout 0 | grep -q 'wake: new worker events'"
+check "wait times out when nothing new" bash -c "$BASH_BIN '$H' wait --timeout 0 | grep -q 'wake: timeout'"
+( sleep 2; CHIRP_SESSION_ID="$API2" h report QUESTION "which db?" >/dev/null 2>&1 ) &
+check "wait wakes on a new report and shows it" bash -c "$BASH_BIN '$H' wait --timeout 1 --interval 1 | grep -q 'QUESTION. api2 .*which db?'"
+wait
+( sleep 2; sess_set "$API" '.status="finished"' ) &
+check "wait wakes on session state change" bash -c "$BASH_BIN '$H' wait --timeout 1 --interval 1 | grep -q 'wake: task, session or flag change'"
+wait; sess_set "$API" '.status="running"'
 
 echo "shared context pool"
 check "lead adds interface (approved)" h ctx add --kind interface --key auth/token "Tokens are JWT, header Authorization: Bearer, 15 min expiry"

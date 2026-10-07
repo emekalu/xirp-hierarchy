@@ -25,6 +25,7 @@ LEAD="${LEAD:-}"
 . "$SCRIPT_DIR/lib/integrate.sh"
 . "$SCRIPT_DIR/lib/worker.sh"
 . "$SCRIPT_DIR/lib/context.sh"
+. "$SCRIPT_DIR/lib/monitor.sh"
 
 cmd_help() {
   cat <<EOF
@@ -34,11 +35,16 @@ Lead (run inside the lead session, or pass --lead <id>):
   init [--test-cmd C] [--base-branch B] [--max-workers 3] [--max-minutes 120] [--max-cost 10]
   config [--test-cmd C] [--max-workers N] [--max-minutes M] [--max-cost USD]
   spawn --name N --goal G --owns path[,path] [--branch B] [--after W] [--force]
-  status [--json]                    workers, HEAD, time, cost, flags (STALE_ACCEPTANCE, DIRTY, UNVERIFIED, OVER_*)
+  preflight [--wait 90]              after spawning: confirm every worker started (shows stuck dialogs)
+  status [--json]                    workers, HEAD, time, cost, flags (STALE_ACCEPTANCE, DIRTY, UNVERIFIED,
+                                     OVER_*, STALLED, WAITING:*)
+  wait [--timeout 10] [--interval 20]
+                                     block until a report/proposal, state or flag change (minutes/seconds)
   inbox [--all]                      worker reports
-  tell <worker> "msg" | broadcast "msg"
+  tell <worker> "msg" [--fyi] | broadcast "msg" [--fyi]
+                                     --fyi: informational, worker must not reply
   review <worker>                    commits, diff stat, scope check, last verification
-  verify <worker>                    run the test command in the worker worktree; records sha+exit+log
+  verify <worker> [--clean-checkout] run the test command in the worker worktree; records sha+exit+log
   accept <worker> [--note T] [--allow-out-of-scope REASON]
                                      requires: clean tree, passing verification at current HEAD, in-scope diff
   reject <worker> "what to fix"
@@ -69,7 +75,7 @@ EOF
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in
-  whoami|init|config|spawn|status|inbox|tell|broadcast|review|verify|accept|reject|cancel|integrate|finish|charter|report|ctx|dump|help)
+  whoami|init|config|spawn|status|inbox|tell|broadcast|review|verify|accept|reject|cancel|integrate|finish|charter|report|ctx|dump|wait|preflight|help)
     "cmd_$cmd" "$@";;
   deploy-check) cmd_deploy_check "$@";;
   *) die "unknown command '$cmd' (see help)";;

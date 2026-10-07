@@ -76,7 +76,7 @@ ctx_add() {
       SELECT last_insert_rowid();")"
     render_charter
     echo "approved #$id [$kind] $key"
-    if [[ $bcast -eq 1 ]]; then cmd_broadcast "Shared context updated: [$kind] $key -- $body (charter: $STATE_ROOT/$LEAD/charter.md)"; fi
+    if [[ $bcast -eq 1 ]]; then cmd_broadcast --fyi "Shared context updated: [$kind] $key -- $body (charter: $STATE_ROOT/$LEAD/charter.md)"; fi
   else
     id="$(tx "
       INSERT INTO context(kind,key,body,task_id,sha,author,status,created_at,updated_at)
@@ -108,7 +108,7 @@ ctx_review() { # approve|reject id [note]
   fi
   local task; task="$(jq -r '.task // empty' <<<"$row")"
   if [[ -n "$task" && "$task" != "$LEAD" ]]; then
-    msg "$task" "[LEAD] Context proposal #$id ($key) ${action}d${note:+: $note}"
+    msg "$task" "[LEAD FYI] Context proposal #$id ($key) ${action}d${note:+: $note}.$FYI_SUFFIX"
   fi
 }
 

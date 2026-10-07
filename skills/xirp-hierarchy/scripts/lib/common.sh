@@ -167,6 +167,9 @@ worktree_of() { # id -> path ('' if unknown)
   echo "$wt"
 }
 
+# Lead -> worker message classes. Workers are told never to acknowledge; FYI says so explicitly.
+FYI_SUFFIX=" (FYI: do not reply.)"
+ASK_SUFFIX=" (Reply only with 'hierarchy.sh report ...' if this needs an answer or changes your status; no acknowledgements.)"
 msg() { # to text
   "$XIRP" session message "$1" "$2" --from "$LEAD" >/dev/null 2>&1 || warn "could not message ${1:0:8}"
 }

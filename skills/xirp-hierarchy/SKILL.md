@@ -49,7 +49,9 @@ scripts/hierarchy.sh whoami     # lead <id> | worker <id> (lead: <id>) | none
    ```
    `spawn` refuses if the owned paths overlap another active worker (unless sequenced with `--after` that worker) or if the worker cap is reached. Each worker gets the brief, `--parent <lead>`, and its own branch and worktree.
 
-3. **Monitor:** `status` shows session state, HEAD, elapsed minutes, cost, and flags (`STALE_ACCEPTANCE`, `DIRTY`, `UNVERIFIED`, `OVER_TIME`, `OVER_COST`, `STALLED`, `WAITING:*`). `inbox` lists reports. Answer questions with `tell`; act on `OVER_*` with `tell` or `cancel`.
+   Then **always** run `scripts/hierarchy.sh preflight` (waits up to 90 s). It fails if a worker hasn't produced a single token, and shows the tail of that worker's terminal. That is usually a Claude Code MCP-approval or folder-trust dialog. Tell the user what it shows. Don't answer the dialog yourself unless they agree.
+
+3. **Monitor:** use `scripts/hierarchy.sh wait` instead of polling. It blocks (default 10 min, checking every 20 s) until a worker reports or proposes context, a task or session changes state, or a flag appears. It then prints the new events and the status table. Unread events from earlier return immediately. Worker messages also arrive as prompts, but only between your turns. `status` shows session state, HEAD, elapsed minutes, cost, and flags (`STALE_ACCEPTANCE`, `DIRTY`, `UNVERIFIED`, `OVER_TIME`, `OVER_COST`, `STALLED`, `WAITING:*`). `inbox` lists reports. Answer questions with `tell`; act on `OVER_*` with `tell` or `cancel`. Send information that needs no answer with `tell --fyi` / `broadcast --fyi`, so workers don't reply. `accept` and `ctx approve` notices are already FYI.
 
    `STALLED` means the agent has produced no tokens after 3+ minutes. Usually the worker terminal is stuck on an interactive prompt (Claude Code's "new MCP servers found" or folder-trust dialog). Inspect it with `tmux capture-pane -p -t xirp-<session-id>` and tell the user. Only dismiss it yourself if the user agrees.
 

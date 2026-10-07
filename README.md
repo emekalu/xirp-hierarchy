@@ -31,8 +31,8 @@ In the session that should lead:
 Then the lead will:
 
 1. `init --test-cmd "npm test"`: write the charter (limits default to 3 workers, 120 min, $10 per worker), then `ctx add --kind interface|decision ...` to record shared interfaces before spawning.
-2. `spawn --name api --owns src/api --goal "…" [--after <worker>]` — overlapping ownership and over-limit spawns are refused.
-3. `status` / `inbox` / `tell` / `broadcast` — monitor; `status` flags `STALE_ACCEPTANCE`, `UNVERIFIED`, `DIRTY`, `OVER_TIME`, `OVER_COST`.
+2. `spawn --name api --owns src/api --goal "…" [--after <worker>]` — overlapping ownership and over-limit spawns are refused. Then `preflight` to confirm every worker actually started.
+3. `wait` (repeat) — blocks until a worker needs you; `status` / `inbox` / `tell [--fyi]` / `broadcast [--fyi]`. Flags: `STALE_ACCEPTANCE`, `UNVERIFIED`, `DIRTY`, `OVER_TIME`, `OVER_COST`, `STALLED`, `WAITING:*`.
 4. `review <w>` → `verify <w>` (lead runs the tests) → `accept <w>` (pinned to the commit SHA) or `reject <w> "…"`.
 5. `integrate` (merges accepted SHAs, runs tests) → `deploy-check` → deploy (asks you first) → `finish --cleanup`.
 
@@ -51,7 +51,8 @@ Workers call `scripts/hierarchy.sh report READY|QUESTION|BLOCKED|PROGRESS "…"`
 | Verifiable acceptance | `verify` records SHA, command, exit code, log; `accept` requires a clean tree and a passing run at HEAD; any new commit makes it stale |
 | Integration | merges the accepted SHA (not the branch tip), aborts on conflict, re-runs tests; `deploy-check` gates deploy |
 | Safe completion | `finish` refuses with unintegrated work; worktrees with tracked changes and unmerged branches are never deleted; untracked-only worktrees need `--discard-untracked` |
-| Stall detection | `status` flags `STALLED` when a worker produced no tokens for 3+ min (typically stuck on an interactive dialog) |
+| Stall detection | `preflight` after spawning fails if a worker hasn't started and shows its terminal tail; `status` flags `STALLED` (no tokens after 3+ min) |
+| Low-noise monitoring | `wait` blocks until something needs the lead (report, proposal, state or flag change) with a persistent read cursor; `[LEAD FYI]` messages and an acknowledgement filter stop workers from replying just to acknowledge |
 | Bounded coordination | max workers, minutes and cost per worker, enforced at spawn and flagged in `status` |
 | Deployment | lead only; charter defaults to `Pre-authorised by user: no` |
 
@@ -68,7 +69,7 @@ skills/xirp-hierarchy/
     ├── lead-protocol.md
     └── worker-protocol.md
 install.sh
-tests/run.sh                     # 85 checks against a mock xirp + real git repo
+tests/run.sh                     # 98 checks against a mock xirp + real git repo
 ```
 
 ## Test

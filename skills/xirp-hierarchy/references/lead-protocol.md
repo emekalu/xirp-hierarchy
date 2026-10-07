@@ -12,9 +12,14 @@ The lead is the only session that merges, deploys, or changes shared conventions
 
 ## While workers run
 
+- Straight after spawning: `preflight`. Don't move on until every worker shows `ok`.
+- Loop on `wait` (not `sleep` + `status`). Handle what it prints, then `wait` again. Stop when it says there are no active tasks.
+- Use `--fyi` on `tell`/`broadcast` for anything that needs no answer. Workers are told never to acknowledge. If one keeps doing it, `tell` it once to stop.
+
 - `[WORKER PROPOSAL]`: approve (`ctx approve <id>`) only if it is true for everyone, otherwise `ctx reject <id> "why"`.
 - `[WORKER QUESTION]` first: a blocked worker burns time idling. Answer with `tell`; if the answer affects other workers, also `ctx add --kind decision` (add `--broadcast` if they are mid-task).
-- Check `status` regularly. React to flags:
+- React to flags (shown by `wait` and `status`):
+  - `STALLED` / `WAITING:*`: the agent isn't working. Run `preflight --wait 0` to see its terminal, then tell the user.
   - `OVER_TIME` / `OVER_COST`: ask for a status `report`, narrow the task, or `cancel` it. Do not raise limits silently; tell the user.
   - `UNVERIFIED`: the worker reported READY; run `review` + `verify`.
   - `STALE_ACCEPTANCE`: the worker committed after acceptance; `verify` + `accept` again, or `reject`.

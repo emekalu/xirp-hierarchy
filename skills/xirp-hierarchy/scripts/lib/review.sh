@@ -129,7 +129,7 @@ cmd_accept() {
   tx "UPDATE tasks SET acceptance=$(q "$acc"), status='accepted', updated_at=$(q "$ts") WHERE id=$(q "$id");
       INSERT INTO reviews(task_id,result,sha,note,at) VALUES ($(q "$id"),'accepted',$(q "$head"),$(qn "$note"),$(q "$ts"));"
   render_charter
-  msg "$id" "[LEAD] Accepted at ${head:0:12}. Do not commit further unless asked; any new commit invalidates this acceptance."
+  msg "$id" "[LEAD FYI] Accepted at ${head:0:12}. Stop here; do not commit unless asked (a new commit invalidates this acceptance).$FYI_SUFFIX"
   echo "accepted $ref at ${head:0:12}"
 }
 
@@ -146,7 +146,7 @@ cmd_reject() {
         SELECT id, acceptance, 'rejected', $(q "$t") FROM tasks WHERE id=$(q "$id") AND acceptance IS NOT NULL;
       UPDATE tasks SET acceptance=NULL, status='changes_requested', updated_at=$(q "$t") WHERE id=$(q "$id");"
   render_charter
-  msg "$id" "[LEAD] Changes requested: $2 -- fix, commit, run the test command, then report READY again."
+  msg "$id" "[LEAD ACTION] Changes requested: $2 -- fix, commit, run the test command, then report READY again. That report is your only reply."
   echo "changes requested from $1"
 }
 
