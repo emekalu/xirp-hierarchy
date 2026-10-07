@@ -17,7 +17,9 @@ bad()  { echo "  FAIL $1"; fail=$((fail+1)); }
 check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi; }
 refuse() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d (should have failed)"; else ok "$d"; fi; }
 h() { "$BASH_BIN" "$H" "$@"; }
-st() { jq "$@" "$XIRP_HIERARCHY_STATE/$LEAD_ID/tasks.json"; }
+st() { "$BASH_BIN" "$H" dump --lead "$LEAD_ID" | jq "$@"; }
+DB() { sqlite3 "$XIRP_HIERARCHY_STATE/$LEAD_ID/state.db" "$1"; }
+CH="$T/state/lead-0000-test/charter.md"
 wt_of() { jq -r .worktreePath "$MOCK_DIR/sessions/$1.json"; }
 commit_in() { (cd "$1" && mkdir -p "$(dirname "$2")" && echo "${3:-x}" >"$2" && git add -A && git commit -qm "edit $2"); }
 
@@ -34,6 +36,9 @@ echo "init/config"
 check "init" h init --base-branch main --test-cmd 'test ! -e FAIL' --max-workers 2
 check "state has limits + test command" st -e '.limits.maxWorkers==2 and .testCommand=="test ! -e FAIL"'
 check "whoami is lead" bash -c "$BASH_BIN '$H' whoami | grep -q '^lead'"
+check "state.db in WAL mode" bash -c "[ \"\$(sqlite3 '$T/state/lead-0000-test/state.db' 'pragma journal_mode')\" = wal ]"
+check "charter shows test command" grep -q 'test ! -e FAIL' "$CH"
+check "config updates charter" bash -c "$BASH_BIN '$H' config --max-cost 7 >/dev/null && grep -q 'minutes, \\\$7' '$CH'"
 
 echo "spawn + registration (bug 1)"
 check "spawn without --after" h spawn --name api --goal "do api" --owns src/api
@@ -41,6 +46,9 @@ check "task without --after is recorded" st -e '.tasks|length==1 and .[0].after=
 refuse "overlapping ownership refused" h spawn --name api2 --goal g --owns src/api/v2
 check "overlap allowed when sequenced --after owner" h spawn --name api2 --goal g --owns src/api/v2 --after api
 check "--after recorded" st -e '.tasks[1].after == .tasks[0].id'
+check "worker created in hierarchy's project" bash -c "[ \"\$(jq -r .project \"$MOCK_DIR/sessions/\$($BASH_BIN '$H' dump | jq -r '.tasks[0].id').json\")\" = \"\$($BASH_BIN '$H' dump | jq -r .project)\" ]"
+check "charter task table generated" grep -q '| 2 | api2 | `hier/api2` |' "$CH"
+refuse "duplicate worker name refused" h spawn --name api --goal g --owns other --force
 refuse "worker limit enforced (2)" h spawn --name ui --goal g --owns src/ui
 refuse "spawn without --owns refused" h spawn --name x --goal g --force
 
@@ -53,6 +61,31 @@ for i in $(seq 1 25); do ( CHIRP_SESSION_ID="$API2" h report PROGRESS "b$i" >/de
 wait
 check "all 50 concurrent reports recorded" st -e '([.tasks[].reports[]]|length)==50'
 check "state still valid JSON with 2 tasks" st -e '.tasks|length==2'
+refuse "worker cannot accept" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" accept api
+refuse "worker cannot spawn" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" spawn --name z --goal g --owns z
+
+echo "shared context pool"
+check "lead adds interface (approved)" h ctx add --kind interface --key auth/token "Tokens are JWT, header Authorization: Bearer, 15 min expiry"
+check "lead adds decision" h ctx add --kind decision --key errors "Return RFC7807 problem+json on all API errors"
+check "worker proposes gotcha" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" ctx add --kind gotcha --key db/migrations "Migrations must be idempotent; CI reruns them"
+check "proposal recorded with task + sha" bash -c "[ \"\$(sqlite3 '$T/state/lead-0000-test/state.db' \"select status||':'||(task_id='$API')||':'||length(sha) from context where key='db/migrations'\")\" = 'proposed:1:40' ]"
+check "lead notified of proposal" grep -q 'WORKER PROPOSAL' "$MOCK_DIR/messages.log"
+check "proposal hidden from search" bash -c "$BASH_BIN '$H' ctx search idempotent | grep -q 'no matches'"
+check "proposal not in charter" bash -c "! grep -q db/migrations '$CH'"
+refuse "worker cannot approve" env CHIRP_SESSION_ID="$API2" "$BASH_BIN" "$H" ctx approve 3
+check "lead approves" h ctx approve 3 "good catch"
+check "approved entry searchable" bash -c "$BASH_BIN '$H' ctx search 'idempotent migrations' | grep -q db/migrations"
+check "search ranks + limits" bash -c "[ \$($BASH_BIN '$H' ctx search 'token jwt errors' --limit 1 | grep -c '^#') -eq 1 ]"
+check "search survives FTS syntax chars" h ctx search 'auth" OR (* NEAR'
+check "charter has approved context" bash -c "grep -q 'auth/token' '$CH' && grep -q 'db/migrations' '$CH'"
+check "re-adding key supersedes" h ctx add --kind interface --key auth/token "Tokens are JWT; 30 min expiry"
+check "one approved per key, old superseded" bash -c "[ \"\$(sqlite3 '$T/state/lead-0000-test/state.db' \"select group_concat(status) from (select status from context where key='auth/token' order by id)\")\" = 'superseded,approved' ]"
+check "charter shows only new version" bash -c "grep -q '30 min' '$CH' && ! grep -q '15 min' '$CH'"
+check "ctx get by key" bash -c "$BASH_BIN '$H' ctx get auth/token | grep -q '30 min'"
+check "sql injection in body stored literally" h ctx add --kind note --key "it's" "x'); DROP TABLE tasks; --"
+check "tasks table intact" st -e '.tasks|length==2'
+for i in $(seq 1 15); do ( CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" ctx add --kind finding --key "f$i" "finding $i" >/dev/null 2>&1 ) & done; wait
+check "15 concurrent proposals recorded" bash -c "[ \$(sqlite3 '$T/state/lead-0000-test/state.db' \"select count(*) from context where key like 'f%' and status='proposed'\") -eq 15 ]"
 
 echo "verification gate"
 commit_in "$WT" src/api/a.txt

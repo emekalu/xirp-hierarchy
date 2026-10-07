@@ -11,10 +11,13 @@ cmd_init() {
     *) die "init: unknown option $1";; esac; done
   [[ -n "$lead" ]] || die "init must run inside the lead session (or pass --lead <id>)"
   local dir="$STATE_ROOT/$lead"
-  if [[ -f "$dir/tasks.json" && $force -eq 0 ]]; then
+  if [[ -f "$dir/state.db" && $force -eq 0 ]]; then
     echo "already initialised: $dir (use --force to overwrite)"; return
   fi
+  [[ "$maxw" =~ ^[0-9]+$ && "$maxm" =~ ^[0-9]+$ ]] || die "init: --max-workers/--max-minutes must be integers"
+  qf "$maxc" >/dev/null
   mkdir -p "$dir/logs"
+  rm -f "$dir/state.db" "$dir/state.db-wal" "$dir/state.db-shm"
   [[ -n "$project" ]] || project="${CHIRP_PROJECT_ID:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
   if [[ -z "$base" ]]; then
     base="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)"
@@ -23,16 +26,14 @@ cmd_init() {
   fi
   render_template "$SKILL_DIR/assets/charter-template.md" \
     "LEAD_ID=$lead" "PROJECT=$project" "BASE_BRANCH=$base" "CREATED_AT=$(now)" \
-    "TEST_CMD=${tc:-<not set: hierarchy.sh config --test-cmd \"...\">}" \
     "MAX_WORKERS=$maxw" "MAX_MINUTES=$maxm" "MAX_COST=$maxc" >"$dir/charter.md"
-  local tmp; tmp="$(mktemp "$dir/tasks.json.tmp.XXXXXX")"
-  jq -n --arg lead "$lead" --arg base "$base" --arg project "$project" --arg tc "$tc" \
-        --argjson mw "$maxw" --argjson mm "$maxm" --argjson mc "$maxc" --arg t "$(now)" \
-    '{version:2, lead:$lead, baseBranch:$base, project:$project,
-      testCommand:(if $tc=="" then null else $tc end),
-      limits:{maxWorkers:$mw, maxMinutes:$mm, maxCostUsd:$mc},
-      status:"active", createdAt:$t, tasks:[], integrationRuns:[]}' >"$tmp"
-  mv "$tmp" "$dir/tasks.json"
+  local db="$dir/state.db"
+  sqlite3 "$db" 'PRAGMA journal_mode=WAL;' >/dev/null
+  sql_on "$db" "BEGIN; $SCHEMA_SQL
+    INSERT INTO hierarchy(id,lead,base_branch,project,test_command,max_workers,max_minutes,max_cost,created_at)
+    VALUES (1,$(q "$lead"),$(q "$base"),$(q "$project"),$(qn "$tc"),$maxw,$maxm,$maxc,$(q "$(now)")); COMMIT;"
+  sql_on "$db" "$FTS_SQL" 2>/dev/null || warn "SQLite lacks FTS5; ctx search falls back to substring matching"
+  LEAD="$lead"; render_charter
   local cur; cur="$(session_json "$lead" 2>/dev/null | jq -r '.name // ""' || true)"
   if [[ -n "$cur" && "$cur" != LEAD:* ]]; then
     "$XIRP" session update "$lead" --name "LEAD: $cur" >/dev/null 2>&1 || true
@@ -45,19 +46,21 @@ cmd_init() {
 }
 
 cmd_config() {
-  local tc="" maxw="" maxm="" maxc="" f='.'
+  local tc="" maxw="" maxm="" maxc="" set=""
   while [[ $# -gt 0 ]]; do case "$1" in
     --lead) LEAD="$2"; shift 2;;  --test-cmd) tc="$2"; shift 2;;
     --max-workers) maxw="$2"; shift 2;;  --max-minutes) maxm="$2"; shift 2;;
     --max-cost) maxc="$2"; shift 2;;
     *) die "config: unknown option $1";; esac; done
   LEAD="$(resolve_lead "$LEAD")"
-  if [[ -n "$tc"   ]]; then f="$f | .testCommand=\$tc"; fi
-  if [[ -n "$maxw" ]]; then f="$f | .limits.maxWorkers=(\$mw|tonumber)"; fi
-  if [[ -n "$maxm" ]]; then f="$f | .limits.maxMinutes=(\$mm|tonumber)"; fi
-  if [[ -n "$maxc" ]]; then f="$f | .limits.maxCostUsd=(\$mc|tonumber)"; fi
-  if [[ "$f" != "." ]]; then
-    tasks_update "$LEAD" --arg tc "$tc" --arg mw "${maxw:-0}" --arg mm "${maxm:-0}" --arg mc "${maxc:-0}" "$f"
+  if [[ -n "$tc"   ]]; then set="$set, test_command=$(q "$tc")"; fi
+  if [[ -n "$maxw" ]]; then set="$set, max_workers=$(qi "$maxw")"; fi
+  if [[ -n "$maxm" ]]; then set="$set, max_minutes=$(qi "$maxm")"; fi
+  if [[ -n "$maxc" ]]; then set="$set, max_cost=$(qf "$maxc")"; fi
+  if [[ -n "$set" ]]; then
+    require_lead "change configuration"
+    sql "UPDATE hierarchy SET ${set#, } WHERE id=1;"
+    render_charter
   fi
   state '{lead, baseBranch, testCommand, limits, status}'
 }
@@ -76,6 +79,8 @@ cmd_spawn() {
   [[ -n "$name" ]] || die "spawn: --name required"
   [[ -n "$goal" ]] || die "spawn: --goal required"
   [[ -n "$owns_raw" ]] || die "spawn: --owns <paths> required (comma-separated files/dirs this worker may change)"
+  require_lead "spawn workers"
+  if state -e --arg n "$name" 'any(.tasks[]; .name==$n)' >/dev/null; then die "spawn: a worker named '$name' already exists"; fi
   local dir="$STATE_ROOT/$LEAD"
   [[ -n "$base" ]] || base="$(state -r '.baseBranch')"
   if [[ -z "$branch" ]]; then
@@ -132,6 +137,8 @@ cmd_spawn() {
   local args=(session new --goal "$brief" --name "W: $name" --new-branch "$branch" --base-branch "$base"
               --parent "$LEAD" --tag "role:worker" --tag "lead:$LEAD" --json)
   if [[ -n "$after_id" ]]; then args+=(--depends-on "$after_id"); fi
+  # workers belong to the hierarchy's project, not whatever the caller's CWD resolves to
+  case " ${extra[*]+"${extra[*]}"} " in *" --project "*) ;; *) args+=(--project "$(state -r .project)");; esac
   args+=(${extra[@]+"${extra[@]}"})
 
   local out id wt
@@ -143,25 +150,19 @@ cmd_spawn() {
   fi
   wt="$(session_json "$id" 2>/dev/null | jq -r '.worktreePath // empty' || true)"
 
-  local task
-  task="$(jq -nc --arg id "$id" --arg name "$name" --arg branch "$branch" --arg base "$base" \
-       --argjson owns "$owns_json" --arg goal "$goal" --arg after "$after_id" --arg wt "$wt" --arg t "$(now)" \
-       '{id:$id, name:$name, branch:$branch, base:$base, owns:$owns, goal:$goal,
-         after:(if $after=="" then null else $after end),
-         worktreePath:(if $wt=="" then null else $wt end),
-         status:"spawned", createdAt:$t, updatedAt:$t,
-         reports:[], verifications:[], reviews:[], acceptance:null, invalidated:[], integration:null}')"
-  [[ -n "$task" ]] || die "internal: failed to build task record for session $id"
-  tasks_update "$LEAD" --argjson task "$task" '.tasks += [$task]'
-  state -e --arg id "$id" 'any(.tasks[]; .id==$id)' >/dev/null \
-    || die "session $id was created but is NOT tracked in tasks.json"
+  local t; t="$(now)"
+  sql "INSERT INTO tasks(id,name,branch,base,owns,goal,after_id,worktree_path,status,created_at,updated_at)
+       VALUES ($(q "$id"),$(q "$name"),$(q "$branch"),$(q "$base"),$(q "$owns_json"),$(q "$goal"),
+               $(qn "$after_id"),$(qn "$wt"),'spawned',$(q "$t"),$(q "$t"));" \
+    || die "session $id was created but is NOT tracked; stop it with: xirp session stop $id"
+  render_charter
 
   echo "spawned worker: $name"
   echo "  session: $id"
   echo "  branch:  $branch (from $base)"
   echo "  owns:    $(jq -r 'join(", ")' <<<"$owns_json")"
   if [[ -n "$after" ]]; then echo "  queued after: $after"; fi
-  echo "add this task to the charter's task table: $dir/charter.md"
+  echo "  charter: $dir/charter.md (task table regenerated)"
 }
 
 enriched_tasks() { # -> JSON array of tasks with live session + git facts and flags
@@ -253,4 +254,10 @@ cmd_charter() {
   if [[ "${1:-}" == "--lead" ]]; then LEAD="$2"; fi
   LEAD="$(resolve_lead "$LEAD")"
   echo "$STATE_ROOT/$LEAD/charter.md"
+}
+
+cmd_dump() {
+  if [[ "${1:-}" == "--lead" ]]; then LEAD="$2"; fi
+  LEAD="$(resolve_lead "$LEAD")"
+  state .
 }

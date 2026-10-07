@@ -5,7 +5,7 @@
 cmd_review() {
   if [[ "${1:-}" == "--lead" ]]; then LEAD="$2"; shift 2; fi
   [[ -n "${1:-}" ]] || die "usage: review <worker>"
-  LEAD="$(resolve_lead "$LEAD")"
+  LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
   local id t wt base facts b v
   id="$(resolve_worker "$1")"; t="$(task_json "$id")"
   wt="$(worktree_of "$id")"; base="$(jq -r .base <<<"$t")"
@@ -33,14 +33,13 @@ cmd_review() {
   echo
   echo "full diff: git -C '$wt' diff $b...HEAD"
   echo "next:      verify $1  ->  accept $1 [--note ...]  |  reject $1 \"what to fix\""
-  tasks_update "$LEAD" --arg id "$id" --arg t "$(now)" --argjson a "$ACTIVE" \
-    '(.tasks[] | select(.id==$id and (.status as $s | $a | index($s)))) |= (.status="reviewing" | .updatedAt=$t)'
+  sql "UPDATE tasks SET status='reviewing', updated_at=$(q "$(now)") WHERE id=$(q "$id") AND status IN ($ACTIVE_SQL);"
 }
 
 cmd_verify() {
   if [[ "${1:-}" == "--lead" ]]; then LEAD="$2"; shift 2; fi
   [[ -n "${1:-}" ]] || die "usage: verify <worker>"
-  LEAD="$(resolve_lead "$LEAD")"
+  LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
   local id t tc wt facts head clean log start rc consistent=true
   id="$(resolve_worker "$1")"; t="$(task_json "$id")"
   tc="$(state -r '.testCommand // ""')"
@@ -60,10 +59,11 @@ cmd_verify() {
   if [[ "$clean" == "true" && -n "$(git -C "$wt" status --porcelain)" ]]; then consistent=false; fi
   if [[ "$consistent" == "false" ]]; then warn "HEAD or worktree changed during the run; result cannot back an acceptance"; fi
   tail -n 15 "$log" | sed 's/^/  | /'
-  tasks_update "$LEAD" --arg id "$id" --arg sha "$head" --arg cmd "$tc" --argjson rc "$rc" \
-    --argjson clean "$clean" --argjson cons "$consistent" --arg s "$start" --arg f "$(now)" --arg log "$log" \
-    '(.tasks[] | select(.id==$id)) |= (.verifications += [{sha:$sha, command:$cmd, exitCode:$rc, clean:$clean,
-       consistent:$cons, startedAt:$s, finishedAt:$f, log:$log}] | .updatedAt=$f)'
+  local fin; fin="$(now)"
+  tx "INSERT INTO verifications(task_id,sha,command,exit_code,clean,consistent,started_at,finished_at,log)
+        VALUES ($(q "$id"),$(q "$head"),$(q "$tc"),$(qi "$rc"),$([[ $clean == true ]] && echo 1 || echo 0),
+                $([[ $consistent == true ]] && echo 1 || echo 0),$(q "$start"),$(q "$fin"),$(q "$log"));
+      UPDATE tasks SET updated_at=$(q "$fin") WHERE id=$(q "$id");"
   if [[ "$rc" == "0" ]]; then echo "PASS at ${head:0:12} (log: $log)"
   else echo "FAIL exit=$rc at ${head:0:12} (log: $log)"; return 1; fi
 }
@@ -75,7 +75,7 @@ cmd_accept() {
     --allow-out-of-scope) scope_reason="$2"; shift 2;;
     -*) die "accept: unknown option $1";;  *) ref="$1"; shift;; esac; done
   [[ -n "$ref" ]] || die "usage: accept <worker> [--note text] [--allow-out-of-scope reason]"
-  LEAD="$(resolve_lead "$LEAD")"
+  LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
   local id t wt base facts head tc problems="" v oos
   id="$(resolve_worker "$ref")"; t="$(task_json "$id")"
   wt="$(worktree_of "$id")"; base="$(jq -r .base <<<"$t")"
@@ -105,16 +105,15 @@ cmd_accept() {
   fi
   if [[ -n "$problems" ]]; then printf 'cannot accept %s:\n%s' "$ref" "$problems" >&2; exit 1; fi
 
-  tasks_update "$LEAD" --arg id "$id" --arg sha "$head" --arg note "$note" --arg sr "$scope_reason" \
-    --arg oos "$oos" --arg t "$(now)" \
-    '(.tasks[] | select(.id==$id)) |= (
-       (.verifications|last) as $v
-       | .acceptance = {sha:$sha, at:$t, note:$note,
-                        verification:{command:$v.command, exitCode:$v.exitCode, finishedAt:$v.finishedAt, log:$v.log},
-                        outOfScope:($oos|split("\n")|map(select(.!=""))),
-                        outOfScopeReason:(if $sr=="" then null else $sr end)}
-       | .reviews += [{result:"accepted", sha:$sha, note:$note, at:$t}]
-       | .status="accepted" | .updatedAt=$t)'
+  local ts acc; ts="$(now)"
+  acc="$(jq -c --arg sha "$head" --arg note "$note" --arg sr "$scope_reason" --arg oos "$oos" --arg t "$ts" \
+    '{sha:$sha, at:$t, note:$note,
+      verification:{command:.command, exitCode:.exitCode, finishedAt:.finishedAt, log:.log},
+      outOfScope:($oos|split("\n")|map(select(.!=""))),
+      outOfScopeReason:(if $sr=="" then null else $sr end)}' <<<"$v")"
+  tx "UPDATE tasks SET acceptance=$(q "$acc"), status='accepted', updated_at=$(q "$ts") WHERE id=$(q "$id");
+      INSERT INTO reviews(task_id,result,sha,note,at) VALUES ($(q "$id"),'accepted',$(q "$head"),$(qn "$note"),$(q "$ts"));"
+  render_charter
   msg "$id" "[LEAD] Accepted at ${head:0:12}. Do not commit further unless asked; any new commit invalidates this acceptance."
   echo "accepted $ref at ${head:0:12}"
 }
@@ -122,15 +121,16 @@ cmd_accept() {
 cmd_reject() {
   if [[ "${1:-}" == "--lead" ]]; then LEAD="$2"; shift 2; fi
   [[ $# -ge 2 ]] || die "usage: reject <worker> \"what to fix\""
-  LEAD="$(resolve_lead "$LEAD")"
+  LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
   local id head
   id="$(resolve_worker "$1")"
   head="$(wt_facts "$(worktree_of "$id")" "$(task_json "$id" | jq -r .base)" | jq -r '.head // ""')"
-  tasks_update "$LEAD" --arg id "$id" --arg sha "$head" --arg note "$2" --arg t "$(now)" \
-    '(.tasks[] | select(.id==$id)) |= (
-       .reviews += [{result:"changes_requested", sha:$sha, note:$note, at:$t}]
-       | (if .acceptance != null then .invalidated += [.acceptance + {invalidatedAt:$t, reason:"rejected"}] else . end)
-       | .acceptance=null | .status="changes_requested" | .updatedAt=$t)'
+  local t; t="$(now)"
+  tx "INSERT INTO reviews(task_id,result,sha,note,at) VALUES ($(q "$id"),'changes_requested',$(qn "$head"),$(q "$2"),$(q "$t"));
+      INSERT INTO invalidations(task_id,acceptance,reason,at)
+        SELECT id, acceptance, 'rejected', $(q "$t") FROM tasks WHERE id=$(q "$id") AND acceptance IS NOT NULL;
+      UPDATE tasks SET acceptance=NULL, status='changes_requested', updated_at=$(q "$t") WHERE id=$(q "$id");"
+  render_charter
   msg "$id" "[LEAD] Changes requested: $2 -- fix, commit, run the test command, then report READY again."
   echo "changes requested from $1"
 }
@@ -138,10 +138,10 @@ cmd_reject() {
 cmd_cancel() {
   if [[ "${1:-}" == "--lead" ]]; then LEAD="$2"; shift 2; fi
   [[ -n "${1:-}" ]] || die "usage: cancel <worker> [reason]"
-  LEAD="$(resolve_lead "$LEAD")"
+  LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
   local id; id="$(resolve_worker "$1")"
   "$XIRP" session stop "$id" >/dev/null 2>&1 || warn "could not stop session ${id:0:8} (already stopped?)"
-  tasks_update "$LEAD" --arg id "$id" --arg r "${2:-cancelled by lead}" --arg t "$(now)" \
-    '(.tasks[] | select(.id==$id)) |= (.status="cancelled" | .cancelReason=$r | .updatedAt=$t)'
+  sql "UPDATE tasks SET status='cancelled', cancel_reason=$(q "${2:-cancelled by lead}"), updated_at=$(q "$(now)") WHERE id=$(q "$id");"
+  render_charter
   echo "cancelled $1 (worktree and branch kept; finish --cleanup checks them before deletion)"
 }

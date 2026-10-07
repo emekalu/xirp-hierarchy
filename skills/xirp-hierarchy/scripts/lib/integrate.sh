@@ -13,7 +13,7 @@ cmd_integrate() {
     --lead) LEAD="$2"; shift 2;;  --repo) repo="$2"; shift 2;;
     --dry-run) dry=1; shift;;  --order) order="$2"; shift 2;;
     *) die "integrate: unknown option $1";; esac; done
-  LEAD="$(resolve_lead "$LEAD")"
+  LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
   repo="$(lead_repo "$repo")"
   local base cur
   base="$(state -r .baseBranch)"; cur="$(git -C "$repo" branch --show-current)"
@@ -59,10 +59,13 @@ cmd_integrate() {
       git -C "$repo" merge --abort >/dev/null 2>&1 || true
       die "merge conflict integrating '$name' (aborted, nothing changed for this task). Have the worker rebase onto $base, then verify + accept again"
     fi
-    tasks_update "$LEAD" --arg id "$id" --arg sha "$sha" --arg mc "$(git -C "$repo" rev-parse HEAD)" --arg t "$(now)" \
-      '(.tasks[] | select(.id==$id)) |= (.integration={sha:$sha, mergeCommit:$mc, at:$t} | .status="integrated" | .updatedAt=$t)'
+    local ts; ts="$(now)"
+    sql "UPDATE tasks SET status='integrated', updated_at=$(q "$ts"),
+           integration=json_object('sha',$(q "$sha"),'mergeCommit',$(q "$(git -C "$repo" rev-parse HEAD)"),'at',$(q "$ts"))
+         WHERE id=$(q "$id");"
   done <<<"$ids"
   if [[ $dry -eq 1 ]]; then return; fi
+  render_charter
   integration_test "$repo"
 }
 
@@ -77,8 +80,8 @@ integration_test() { # repo — run the test command on the integrated HEAD and 
   echo "running integration tests in $repo: $tc"
   rc="$(run_logged "$repo" "$log" "$tc")"
   tail -n 15 "$log" | sed 's/^/  | /'
-  tasks_update "$LEAD" --arg sha "$head" --arg cmd "$tc" --argjson rc "$rc" --arg s "$s" --arg f "$(now)" --arg log "$log" \
-    '.integrationRuns += [{sha:$sha, command:$cmd, exitCode:$rc, startedAt:$s, finishedAt:$f, log:$log}]'
+  sql "INSERT INTO integration_runs(sha,command,exit_code,started_at,finished_at,log)
+       VALUES ($(q "$head"),$(q "$tc"),$(qi "$rc"),$(q "$s"),$(q "$(now)"),$(q "$log"));"
   if [[ "$rc" == "0" ]]; then echo "integration PASS at ${head:0:12}"
   else echo "integration FAIL exit=$rc at ${head:0:12} (log: $log). Do not deploy."; return 1; fi
 }
@@ -88,7 +91,7 @@ cmd_deploy_check() {
   while [[ $# -gt 0 ]]; do case "$1" in
     --lead) LEAD="$2"; shift 2;;  --repo) repo="$2"; shift 2;;
     *) die "deploy-check: unknown option $1";; esac; done
-  LEAD="$(resolve_lead "$LEAD")"
+  LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
   repo="$(lead_repo "$repo")"
   local head problems="" open run
   head="$(git -C "$repo" rev-parse HEAD)"
@@ -111,7 +114,7 @@ cmd_finish() {
     --lead) LEAD="$2"; shift 2;;  --cleanup) cleanup=1; shift;;
     --delete-branches) delbranch=1; shift;;  --force) force=1; shift;;
     *) die "finish: unknown option $1";; esac; done
-  LEAD="$(resolve_lead "$LEAD")"
+  LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
 
   # Inspect every task. Hard blocks (dirty) are never deleted; soft blocks need --force.
   local id t name st wt facts hard="" soft="" deletable=""
@@ -138,7 +141,7 @@ cmd_finish() {
     die "refusing to finish with unintegrated work; integrate it, cancel it deliberately, or pass --force"
   fi
 
-  tasks_update "$LEAD" --arg t "$(now)" '.status="done" | .finishedAt=$t'
+  sql "UPDATE hierarchy SET status='done', finished_at=$(q "$(now)") WHERE id=1;"
   echo "hierarchy $LEAD marked done (state kept at $STATE_ROOT/$LEAD)"
   if [[ $cleanup -eq 0 ]]; then return; fi
 

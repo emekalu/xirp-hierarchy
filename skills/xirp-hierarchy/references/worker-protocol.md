@@ -4,7 +4,7 @@ You are one of a few agents working under a lead session. The lead owns integrat
 
 ## Start
 
-1. Read the charter at the path in your brief. Note the conventions, the interfaces, the test command, and your owned paths.
+1. Read the charter at the path in your brief. Note the conventions, the test command, your owned paths, and the **Shared context** section (approved interfaces and decisions are binding).
 2. Confirm you are on your own branch (`git branch --show-current`). Never switch to the base branch.
 3. If the task seems to need files outside your owned paths, report `QUESTION` **before** writing code. The lead's `accept` rejects out-of-scope changes.
 
@@ -34,6 +34,16 @@ You are one of a few agents working under a lead session. The lead owns integrat
 ```
 
 Keep reports short and factual.
+
+## Shared context
+
+- Before designing anything that crosses a boundary (an API shape, data format, error convention, shared config), check the charter's Shared context or run `<skill-dir>/scripts/hierarchy.sh ctx search "words"`.
+- If you learn something other workers would trip over, propose it:
+  ```bash
+  <skill-dir>/scripts/hierarchy.sh ctx add --kind gotcha --key db/migrations "Migrations must be idempotent; CI reruns them"
+  ```
+  Kinds: `decision`, `interface`, `gotcha`, `finding`, `note`. Your entry is a proposal until the lead approves it; don't rely on it before then.
+- Don't use it to ask questions or chat. Use `report QUESTION`.
 
 ## Messages from the lead
 

@@ -2,13 +2,13 @@
 # hierarchy.sh — lead/worker orchestration over xirp sessions.
 #
 # State lives in $STATE_ROOT/<lead-id>/:
-#   charter.md   human-readable rules (conventions, scope, deploy)
-#   tasks.json   machine state; ONLY written through tasks_update()
+#   state.db     SQLite (WAL): hierarchy, tasks, reports, verifications, reviews,
+#                invalidations, integration runs, shared context (+ FTS5 index)
+#   charter.md   human-readable rules; Tasks and Shared context sections are generated
 #   logs/        verification and integration test logs
 #
-# Every write to tasks.json takes an exclusive lock (flock(1) or perl flock),
-# applies a jq filter, validates the result, then atomically replaces the file.
-# Compatible with bash 3.2 (macOS /bin/bash).
+# Multi-statement writes run in BEGIN IMMEDIATE transactions; concurrent sessions
+# serialise on SQLite's lock. Compatible with bash 3.2 (macOS /bin/bash).
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -24,6 +24,7 @@ LEAD="${LEAD:-}"
 . "$SCRIPT_DIR/lib/review.sh"
 . "$SCRIPT_DIR/lib/integrate.sh"
 . "$SCRIPT_DIR/lib/worker.sh"
+. "$SCRIPT_DIR/lib/context.sh"
 
 cmd_help() {
   cat <<EOF
@@ -34,7 +35,7 @@ Lead (run inside the lead session, or pass --lead <id>):
   config [--test-cmd C] [--max-workers N] [--max-minutes M] [--max-cost USD]
   spawn --name N --goal G --owns path[,path] [--branch B] [--after W] [--force]
   status [--json]                    workers, HEAD, time, cost, flags (STALE_ACCEPTANCE, DIRTY, UNVERIFIED, OVER_*)
-  inbox [--all]                      worker reports (from tasks.json)
+  inbox [--all]                      worker reports
   tell <worker> "msg" | broadcast "msg"
   review <worker>                    commits, diff stat, scope check, last verification
   verify <worker>                    run the test command in the worker worktree; records sha+exit+log
@@ -48,6 +49,13 @@ Lead (run inside the lead session, or pass --lead <id>):
   finish [--cleanup] [--delete-branches] [--force]
                                      refuses on uncommitted or unintegrated work unless --force (dirty is never deleted)
   charter                            print charter path
+  dump                               whole state as JSON (read-only)
+
+Shared context (lead entries are approved; worker entries are proposals until approved):
+  ctx add --kind decision|interface|gotcha|finding|note --key K "body" [--task W] [--broadcast]
+  ctx approve <id> [note] | ctx reject <id> [note]        lead only
+  ctx search "words" [--limit 5] [--include-proposed]       approved entries, ranked
+  ctx get <key|#id> | ctx list [--proposed|--all] [--kind K] | ctx render
 
 Worker (inside a worker session):
   report READY|QUESTION|BLOCKED|PROGRESS "text"
@@ -55,14 +63,13 @@ Worker (inside a worker session):
 Either:
   whoami                             lead | worker | none
 
-State: $STATE_ROOT/<lead-id>/{charter.md,tasks.json,logs/}
+State: $STATE_ROOT/<lead-id>/{state.db,charter.md,logs/}
 EOF
 }
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in
-  __apply) cmd___apply "$@";;
-  whoami|init|config|spawn|status|inbox|tell|broadcast|review|verify|accept|reject|cancel|integrate|finish|charter|report|help)
+  whoami|init|config|spawn|status|inbox|tell|broadcast|review|verify|accept|reject|cancel|integrate|finish|charter|report|ctx|dump|help)
     "cmd_$cmd" "$@";;
   deploy-check) cmd_deploy_check "$@";;
   *) die "unknown command '$cmd' (see help)";;

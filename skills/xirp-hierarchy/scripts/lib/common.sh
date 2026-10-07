@@ -1,65 +1,135 @@
 # shellcheck shell=bash
-# Shared helpers: errors, locking, state I/O, xirp and git queries.
+# Shared helpers: errors, SQLite state, xirp and git queries.
 
 # task states that consume a worker slot
 ACTIVE='["spawned","working","question","blocked","ready","reviewing","changes_requested"]'
 # task states that still own their files
 OWNING='["spawned","working","question","blocked","ready","reviewing","changes_requested","accepted"]'
+ACTIVE_SQL="'spawned','working','question','blocked','ready','reviewing','changes_requested'"
 
 die()  { echo "error: $*" >&2; exit 1; }
 warn() { echo "warning: $*" >&2; }
 now()  { date -u +%FT%TZ; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed"; }
 
-need jq; need git
+need jq; need git; need sqlite3
 [[ -x "$XIRP" ]] || die "xirp CLI not found at $XIRP (set XIRP_BIN to override)"
 
-# ---------------------------------------------------------------- locking + state
+# ---------------------------------------------------------------- SQLite state
+#
+# One database per hierarchy: $STATE_ROOT/<lead>/state.db (WAL mode).
+# Every multi-statement change runs inside BEGIN IMMEDIATE ... COMMIT, so concurrent
+# workers serialise on SQLite's write lock instead of overwriting each other.
 
-locked() { # lockfile cmd...
-  local lf="$1"; shift
-  if command -v flock >/dev/null 2>&1; then
-    flock -w "${XIRP_HIERARCHY_LOCK_TIMEOUT:-30}" "$lf" "$@"
-  else
-    need perl
-    # $^F is raised before open() so the locked fd survives exec into the command.
-    perl -MFcntl=:flock -e '
-      $^F = 1023; my $lf = shift; my $t = $ENV{XIRP_HIERARCHY_LOCK_TIMEOUT} || 30;
-      open(my $fh, ">>", $lf) or die "lock $lf: $!\n";
-      my $s = time;
-      until (flock($fh, LOCK_EX | LOCK_NB)) {
-        die "timed out waiting for lock $lf\n" if time - $s > $t;
-        select(undef, undef, undef, 0.05);
-      }
-      exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!\n";' "$lf" "$@"
-  fi
+db_path()   { echo "$STATE_ROOT/$1/state.db"; }
+has_state() { [[ -f "$(db_path "$1")" ]]; }
+
+# q <text> -> SQL string literal; qn -> NULL when empty; qi -> integer or die
+q()  { local sq="'"; local s="${1//$sq/$sq$sq}"; printf "'%s'" "$s"; }
+qn() { if [[ -z "${1:-}" ]]; then printf 'NULL'; else q "$1"; fi; }
+qi() { [[ "$1" =~ ^-?[0-9]+$ ]] || die "not an integer: '$1'"; printf '%s' "$1"; }
+qf() { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "not a number: '$1'"; printf '%s' "$1"; }
+
+# sql_on <db-file> <sql>  — runs with a busy timeout; fails on first error
+sql_on() {
+  printf '.timeout %s\nPRAGMA foreign_keys=ON;\n%s\n' "${XIRP_HIERARCHY_BUSY_MS:-30000}" "$2" \
+    | sqlite3 -bail -batch -noheader "$1"
 }
+sql() { has_state "$LEAD" || die "no state for lead $LEAD (run init)"; sql_on "$(db_path "$LEAD")" "$1"; }
+tx()  { sql "BEGIN IMMEDIATE;
+$1
+COMMIT;"; }
 
-tasks_file() { echo "$STATE_ROOT/$1/tasks.json"; }
+SCHEMA_SQL="
+CREATE TABLE hierarchy (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  lead TEXT NOT NULL, base_branch TEXT NOT NULL, project TEXT, test_command TEXT,
+  max_workers INTEGER NOT NULL, max_minutes INTEGER NOT NULL, max_cost REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, finished_at TEXT);
+CREATE TABLE tasks (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE, name TEXT NOT NULL UNIQUE, branch TEXT NOT NULL, base TEXT NOT NULL,
+  owns TEXT NOT NULL CHECK (json_valid(owns) AND json_array_length(owns) > 0),
+  goal TEXT NOT NULL, after_id TEXT, worktree_path TEXT,
+  status TEXT NOT NULL, cancel_reason TEXT,
+  acceptance TEXT CHECK (acceptance IS NULL OR json_valid(acceptance)),
+  integration TEXT CHECK (integration IS NULL OR json_valid(integration)),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE reports (
+  id INTEGER PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+  kind TEXT NOT NULL, text TEXT NOT NULL, sha TEXT, at TEXT NOT NULL);
+CREATE TABLE verifications (
+  id INTEGER PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+  sha TEXT NOT NULL, command TEXT NOT NULL, exit_code INTEGER NOT NULL,
+  clean INTEGER NOT NULL, consistent INTEGER NOT NULL,
+  started_at TEXT NOT NULL, finished_at TEXT NOT NULL, log TEXT NOT NULL);
+CREATE TABLE reviews (
+  id INTEGER PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+  result TEXT NOT NULL, sha TEXT, note TEXT, at TEXT NOT NULL);
+CREATE TABLE invalidations (
+  id INTEGER PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+  acceptance TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE integration_runs (
+  id INTEGER PRIMARY KEY, sha TEXT NOT NULL, command TEXT NOT NULL, exit_code INTEGER NOT NULL,
+  started_at TEXT NOT NULL, finished_at TEXT NOT NULL, log TEXT NOT NULL);
+CREATE TABLE context (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('decision','interface','gotcha','finding','note')),
+  key TEXT NOT NULL, body TEXT NOT NULL,
+  task_id TEXT, sha TEXT, author TEXT,
+  status TEXT NOT NULL CHECK (status IN ('proposed','approved','superseded','rejected')),
+  supersedes INTEGER REFERENCES context(id), review_note TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE UNIQUE INDEX context_one_approved_per_key ON context(key) WHERE status = 'approved';
+"
+FTS_SQL="
+CREATE VIRTUAL TABLE context_fts USING fts5(key, body, content='context', content_rowid='id');
+CREATE TRIGGER context_ai AFTER INSERT ON context BEGIN
+  INSERT INTO context_fts(rowid, key, body) VALUES (new.id, new.key, new.body); END;
+CREATE TRIGGER context_ad AFTER DELETE ON context BEGIN
+  INSERT INTO context_fts(context_fts, rowid, key, body) VALUES ('delete', old.id, old.key, old.body); END;
+CREATE TRIGGER context_au AFTER UPDATE OF key, body ON context BEGIN
+  INSERT INTO context_fts(context_fts, rowid, key, body) VALUES ('delete', old.id, old.key, old.body);
+  INSERT INTO context_fts(rowid, key, body) VALUES (new.id, new.key, new.body); END;
+"
 
-# tasks_update <lead> <jq args...> — locked, validated, atomic replace
-tasks_update() {
-  local tf; tf="$(tasks_file "$1")"; shift
-  [[ -f "$tf" ]] || die "no state file $tf (run init)"
-  locked "$tf.lock" bash "$SELF" __apply "$tf" "$@"
-}
+has_fts() { [[ "$(sql "SELECT count(*) FROM sqlite_master WHERE name='context_fts';")" == "1" ]]; }
 
-cmd___apply() { # internal; runs while holding the lock
-  local tf="$1"; shift
-  local before tmp
-  before="$(jq '.tasks | length' "$tf")"
-  tmp="$(mktemp "$tf.tmp.XXXXXX")"
-  if ! jq "$@" "$tf" >"$tmp"; then rm -f "$tmp"; die "state update failed (jq error)"; fi
-  if ! jq -e --argjson n "$before" \
-      'type=="object" and (.tasks|type=="array") and (.tasks|length) >= $n
-       and all(.tasks[]; (.id|type)=="string")' "$tmp" >/dev/null; then
-    rm -f "$tmp"; die "state update would lose or corrupt tasks; nothing written"
-  fi
-  mv "$tmp" "$tf"
-}
+# Whole hierarchy as one JSON document (same shape the jq-based readers expect).
+DOC_SQL="
+SELECT json_object(
+  'version', 3, 'lead', h.lead, 'baseBranch', h.base_branch, 'project', h.project,
+  'testCommand', h.test_command,
+  'limits', json_object('maxWorkers', h.max_workers, 'maxMinutes', h.max_minutes, 'maxCostUsd', h.max_cost),
+  'status', h.status, 'createdAt', h.created_at, 'finishedAt', h.finished_at,
+  'tasks', (SELECT json_group_array(json(x)) FROM (SELECT json_object(
+      'id', t.id, 'name', t.name, 'branch', t.branch, 'base', t.base, 'owns', json(t.owns),
+      'goal', t.goal, 'after', t.after_id, 'worktreePath', t.worktree_path, 'status', t.status,
+      'cancelReason', t.cancel_reason, 'createdAt', t.created_at, 'updatedAt', t.updated_at,
+      'acceptance', json(t.acceptance), 'integration', json(t.integration),
+      'reports', (SELECT json_group_array(json(y)) FROM (SELECT json_object(
+          'kind', kind, 'text', text, 'sha', sha, 'at', at) AS y
+          FROM reports WHERE task_id = t.id ORDER BY id)),
+      'verifications', (SELECT json_group_array(json(y)) FROM (SELECT json_object(
+          'sha', sha, 'command', command, 'exitCode', exit_code,
+          'clean', json(CASE WHEN clean THEN 'true' ELSE 'false' END),
+          'consistent', json(CASE WHEN consistent THEN 'true' ELSE 'false' END),
+          'startedAt', started_at, 'finishedAt', finished_at, 'log', log) AS y
+          FROM verifications WHERE task_id = t.id ORDER BY id)),
+      'reviews', (SELECT json_group_array(json(y)) FROM (SELECT json_object(
+          'result', result, 'sha', sha, 'note', note, 'at', at) AS y
+          FROM reviews WHERE task_id = t.id ORDER BY id)),
+      'invalidated', (SELECT json_group_array(json(y)) FROM (SELECT
+          json_set(acceptance, '$.invalidatedAt', at, '$.reason', reason) AS y
+          FROM invalidations WHERE task_id = t.id ORDER BY id))
+    ) AS x FROM tasks t ORDER BY t.seq)),
+  'integrationRuns', (SELECT json_group_array(json(x)) FROM (SELECT json_object(
+      'sha', sha, 'command', command, 'exitCode', exit_code, 'startedAt', started_at,
+      'finishedAt', finished_at, 'log', log) AS x FROM integration_runs ORDER BY id))
+) FROM hierarchy h WHERE h.id = 1;"
 
-state()     { jq "$@" "$(tasks_file "$LEAD")"; }
-task_json() { jq -c --arg id "$1" '.tasks[] | select(.id==$id)' "$(tasks_file "$LEAD")"; }
+state()     { sql "$DOC_SQL" | jq "$@"; }
+task_json() { state -c --arg id "$1" '.tasks[] | select(.id==$id)'; }
 
 # ---------------------------------------------------------------- xirp
 
@@ -72,12 +142,16 @@ resolve_lead() {
   if [[ -n "${XIRP_HIERARCHY_LEAD:-}" ]]; then echo "$XIRP_HIERARCHY_LEAD"; return; fi
   me="${CHIRP_SESSION_ID:-}"
   if [[ -n "$me" ]]; then
-    if [[ -f "$STATE_ROOT/$me/tasks.json" ]]; then echo "$me"; return; fi
+    if has_state "$me"; then echo "$me"; return; fi
     parent="$(session_json "$me" | jq -r '.parentSessionId // empty')"
-    if [[ -n "$parent" && -f "$STATE_ROOT/$parent/tasks.json" ]]; then echo "$parent"; return; fi
+    if [[ -n "$parent" ]] && has_state "$parent"; then echo "$parent"; return; fi
   fi
   die "cannot determine lead session; run 'init' in the lead session or pass --lead <id>"
 }
+
+# true when the caller acts with lead authority (the lead session, or a human outside any session)
+is_lead_caller() { [[ -z "${CHIRP_SESSION_ID:-}" || "${CHIRP_SESSION_ID:-}" == "$LEAD" ]]; }
+require_lead()   { is_lead_caller || die "only the lead session may $1"; }
 
 resolve_worker() { # ref -> id
   local id

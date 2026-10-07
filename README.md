@@ -16,7 +16,7 @@ cd ~/code/xirp-hierarchy
 ./install.sh --uninstall
 ```
 
-Requirements: `xirp` at `~/.local/bin/xirp` (installed by the Chirp desktop app), `jq`, `git`, and `flock` or `perl` (macOS ships perl). Works with bash 3.2+.
+Requirements: `xirp` at `~/.local/bin/xirp` (installed by the Chirp desktop app), `jq`, `git`, and `sqlite3` (preinstalled on macOS). Works with bash 3.2+.
 
 **When not to use it:** coordination (briefing, context loading, review, integration) has real cost. Use a hierarchy only for 2–3 substantial tasks with disjoint files, clear interfaces, and a runnable test command. Otherwise use one session.
 
@@ -30,7 +30,7 @@ In the session that should lead:
 
 Then the lead will:
 
-1. `init --test-cmd "npm test"` — write the charter (limits default to 3 workers, 120 min, $10 per worker).
+1. `init --test-cmd "npm test"`: write the charter (limits default to 3 workers, 120 min, $10 per worker), then `ctx add --kind interface|decision ...` to record shared interfaces before spawning.
 2. `spawn --name api --owns src/api --goal "…" [--after <worker>]` — overlapping ownership and over-limit spawns are refused.
 3. `status` / `inbox` / `tell` / `broadcast` — monitor; `status` flags `STALE_ACCEPTANCE`, `UNVERIFIED`, `DIRTY`, `OVER_TIME`, `OVER_COST`.
 4. `review <w>` → `verify <w>` (lead runs the tests) → `accept <w>` (pinned to the commit SHA) or `reject <w> "…"`.
@@ -45,7 +45,8 @@ Workers call `scripts/hierarchy.sh report READY|QUESTION|BLOCKED|PROGRESS "…"`
 | One source of truth | `~/.local/state/xirp-hierarchy/<lead-id>/charter.md`, outside any worktree, read by every session by absolute path |
 | Reporting line | workers are created with `--parent <lead>` and tagged `role:worker lead:<id>`; reports go through `xirp session message` |
 | Sequencing | `spawn --after <worker>` adds an `xirp --depends-on` edge |
-| Reliable state | every `tasks.json` write is locked (`flock` or perl `flock`), validated (can never drop tasks), and atomically replaced |
+| Reliable state | SQLite (WAL) per hierarchy; multi-step writes are `BEGIN IMMEDIATE` transactions, with schema constraints |
+| Shared context | lead-curated decisions/interfaces/gotchas with FTS5 search; worker entries are proposals until approved; approved entries render into the charter |
 | File ownership | `spawn --owns`; overlaps refused unless sequenced with `--after`; `accept` rejects out-of-scope diffs |
 | Verifiable acceptance | `verify` records SHA, command, exit code, log; `accept` requires a clean tree and a passing run at HEAD; any new commit makes it stale |
 | Integration | merges the accepted SHA (not the branch tip), aborts on conflict, re-runs tests; `deploy-check` gates deploy |
@@ -59,14 +60,14 @@ Workers call `scripts/hierarchy.sh report READY|QUESTION|BLOCKED|PROGRESS "…"`
 skills/xirp-hierarchy/
 ├── SKILL.md                     # instructions loaded by the agent
 ├── scripts/hierarchy.sh         # entry point; `help` lists commands
-├── scripts/lib/                 # common (locking/state), lead, review, integrate, worker
+├── scripts/lib/                 # common (SQLite state), lead, review, integrate, worker, context
 ├── assets/charter-template.md   # filled in by `init`
 ├── assets/worker-brief.md       # prepended to every worker's goal
 └── references/
     ├── lead-protocol.md
     └── worker-protocol.md
 install.sh
-tests/run.sh                     # 42 checks against a mock xirp + real git repo
+tests/run.sh                     # 69 checks against a mock xirp + real git repo
 ```
 
 ## Test

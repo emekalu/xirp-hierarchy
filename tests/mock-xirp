@@ -14,11 +14,11 @@ sub="$2"; shift 2
 log "session $sub $*"
 case "$sub" in
   new)
-    name="" goal="" branch="" base="main" parent="" deps="" tags=()
+    name="" goal="" branch="" base="main" parent="" deps="" project="" tags=()
     while [[ $# -gt 0 ]]; do case "$1" in
       --name) name="$2"; shift 2;; --goal) goal="$2"; shift 2;;
       --new-branch) branch="$2"; shift 2;; --base-branch) base="$2"; shift 2;;
-      --parent) parent="$2"; shift 2;; --depends-on) deps="$2"; shift 2;;
+      --parent) parent="$2"; shift 2;; --project) project="$2"; shift 2;; --depends-on) deps="$2"; shift 2;;
       --tag) tags+=("$2"); shift 2;; --json) shift;; *) shift;; esac; done
     id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
     wt=""
@@ -27,10 +27,10 @@ case "$sub" in
       git -C "$MOCK_REPO" worktree add -q -b "$branch" "$wt" "$base" >/dev/null 2>&1
     fi
     jq -n --arg id "$id" --arg name "$name" --arg goal "$goal" --arg branch "$branch" --arg wt "$wt" \
-          --arg parent "$parent" --arg deps "$deps" --argjson tags "$(printf '%s\n' "${tags[@]+"${tags[@]}"}" | jq -R . | jq -s 'map(select(.!=""))')" \
+          --arg parent "$parent" --arg deps "$deps" --arg project "$project" --argjson tags "$(printf '%s\n' "${tags[@]+"${tags[@]}"}" | jq -R . | jq -s 'map(select(.!=""))')" \
       '{id:$id, name:$name, goal:$goal, branch:$branch, worktreePath:(if $wt=="" then null else $wt end),
         parentSessionId:(if $parent=="" then null else $parent end), dependsOnSessionIds:(if $deps=="" then [] else [$deps] end),
-        tags:$tags, status:"running", totalCostUsd:0}' >"$S/$id.json"
+        tags:$tags, project:$project, status:"running", totalCostUsd:0}' >"$S/$id.json"
     jq -c '{id}' "$S/$id.json";;
   get)
     f="$(find_session "$1")" || { echo "session not found: $1" >&2; exit 1; }

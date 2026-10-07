@@ -4,11 +4,11 @@
 cmd_whoami() {
   local me="${CHIRP_SESSION_ID:-}" sj parent goal
   if [[ -z "$me" ]]; then echo "none (not inside a managed xirp session)"; return; fi
-  if [[ -f "$STATE_ROOT/$me/tasks.json" ]]; then echo "lead $me"; return; fi
+  if has_state "$me"; then echo "lead $me"; return; fi
   sj="$(session_json "$me")"
   parent="$(jq -r '.parentSessionId // empty' <<<"$sj")"
   goal="$(jq -r '.goal // ""' <<<"$sj")"
-  if [[ -n "$parent" && -f "$STATE_ROOT/$parent/tasks.json" ]] || grep -q 'XIRP-HIERARCHY WORKER BRIEF' <<<"$goal"; then
+  if { [[ -n "$parent" ]] && has_state "$parent"; } || grep -q 'XIRP-HIERARCHY WORKER BRIEF' <<<"$goal"; then
     echo "worker $me (lead: ${parent:-unknown})"; return
   fi
   echo "none $me"
@@ -41,20 +41,21 @@ cmd_report() {
 
   "$XIRP" session message "$LEAD" "[WORKER $kind] $name (${me:0:8}, $branch @ ${sha:0:8}): $text" --from "$me"
 
-  if [[ -f "$(tasks_file "$LEAD")" ]]; then
+  if has_state "$LEAD"; then
     if ! state -e --arg id "$me" 'any(.tasks[]; .id==$id)' >/dev/null; then
-      warn "this session is not registered in the lead's tasks.json; the lead must track it"
+      warn "this session is not registered in the lead's state; the lead must track it"
     else
-      # Append report; a new SHA invalidates any prior acceptance.
-      tasks_update "$LEAD" --arg id "$me" --arg k "$kind" --arg text "$text" --arg sha "$sha" --arg st "$st" --arg t "$(now)" \
-        '(.tasks[] | select(.id==$id)) |= (
-           .reports += [{kind:$k, text:$text, sha:$sha, at:$t}]
-           | (if .acceptance != null and $sha != "" and .acceptance.sha != $sha
-              then .invalidated += [.acceptance + {invalidatedAt:$t, reason:"worker reported new commit \($sha[0:12])"}]
-                   | .acceptance = null
-              else . end)
-           | .status = (if .acceptance != null and (.status=="accepted" or .status=="integrated") then .status else $st end)
-           | .updatedAt = $t)'
+      # One transaction: append report; a different SHA invalidates any prior acceptance; set status.
+      local t id; t="$(now)"; id="$(q "$me")"
+      local moved="acceptance IS NOT NULL AND $(q "$sha") <> '' AND json_extract(acceptance,'\$.sha') <> $(q "$sha")"
+      tx "INSERT INTO reports(task_id,kind,text,sha,at) VALUES ($id,$(q "$kind"),$(q "$text"),$(qn "$sha"),$(q "$t"));
+          INSERT INTO invalidations(task_id,acceptance,reason,at)
+            SELECT id, acceptance, 'worker reported new commit ' || substr($(q "$sha"),1,12), $(q "$t")
+            FROM tasks WHERE id=$id AND $moved;
+          UPDATE tasks SET acceptance=NULL WHERE id=$id AND $moved;
+          UPDATE tasks SET updated_at=$(q "$t"),
+            status = CASE WHEN status='cancelled' THEN status WHEN acceptance IS NOT NULL AND status IN ('accepted','integrated') THEN status ELSE $(q "$st") END
+          WHERE id=$id;"
     fi
   fi
   echo "reported $kind to lead ${LEAD:0:8}"

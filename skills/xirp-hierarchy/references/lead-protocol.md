@@ -8,11 +8,12 @@ The lead is the only session that merges, deploys, or changes shared conventions
 2. `init --test-cmd "..."` once. Fill the charter **from the repository**: lint/format config, the test runner in `package.json`/`Makefile`/`pyproject.toml`, CI workflows, `CONTRIBUTING.md`, existing patterns.
 3. Write down the interfaces between tasks in the charter before spawning, such as function signatures, API shapes, and file boundaries. Most integration failures come from interfaces left implicit.
 4. Assign **ownership** per task (`--owns`). Keep it narrow. If two tasks must touch the same file, sequence them with `--after`; never run them in parallel.
-5. Record every task in the charter's task table. `tasks.json` is the machine record; the charter is what workers read.
+5. Record shared interfaces and decisions with `ctx add` before spawning. The charter's task table and Shared context section regenerate automatically from `state.db`.
 
 ## While workers run
 
-- `[WORKER QUESTION]` first: a blocked worker burns time idling. Answer with `tell`, and append the decision to the charter's Decisions log.
+- `[WORKER PROPOSAL]`: approve (`ctx approve <id>`) only if it is true for everyone, otherwise `ctx reject <id> "why"`.
+- `[WORKER QUESTION]` first: a blocked worker burns time idling. Answer with `tell`; if the answer affects other workers, also `ctx add --kind decision` (add `--broadcast` if they are mid-task).
 - Check `status` regularly. React to flags:
   - `OVER_TIME` / `OVER_COST`: ask for a status `report`, narrow the task, or `cancel` it. Do not raise limits silently; tell the user.
   - `UNVERIFIED`: the worker reported READY; run `review` + `verify`.

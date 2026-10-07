@@ -7,7 +7,7 @@ description: 'Run a bounded lead/worker agent hierarchy over xirp sessions. The 
 
 One session leads; a few others work. The lead plans, briefs, verifies, integrates, and deploys. Workers implement one scoped task in their own worktree and report back. They never merge or deploy.
 
-Helper: `scripts/hierarchy.sh` (relative to this skill directory). Run `scripts/hierarchy.sh help` for the full command list. It needs `xirp`, `jq`, `git`, and either `flock` or `perl`. It never calls `xirp update`.
+Helper: `scripts/hierarchy.sh` (relative to this skill directory). Run `scripts/hierarchy.sh help` for the full command list. It needs `xirp`, `jq`, `git`, and `sqlite3`. It never calls `xirp update`.
 
 Read `references/lead-protocol.md` when acting as lead and `references/worker-protocol.md` when acting as worker.
 
@@ -34,7 +34,13 @@ scripts/hierarchy.sh whoami     # lead <id> | worker <id> (lead: <id>) | none
    ```bash
    scripts/hierarchy.sh init --test-cmd "npm test" [--max-workers 3 --max-minutes 120 --max-cost 10]
    ```
-   Fill `charter.md` from the repo (lint config, CI, CONTRIBUTING, existing patterns). Ask the user only what the repo cannot answer. The test command in `tasks.json` is the one that is actually executed; change it with `config --test-cmd`.
+   Fill `charter.md` from the repo (lint config, CI, CONTRIBUTING, existing patterns). Ask the user only what the repo cannot answer. The test command stored in `state.db` is the one actually executed; change it with `config --test-cmd`. The charter's test command, limits, Tasks, and Shared context sections are generated from `state.db`; don't edit them by hand.
+
+   Record interfaces and key decisions **before spawning**, so every brief points at the same answers:
+   ```bash
+   scripts/hierarchy.sh ctx add --kind interface --key api/users "GET /users/:id -> {id,name,email}; 404 problem+json"
+   scripts/hierarchy.sh ctx add --kind decision  --key errors    "RFC7807 problem+json everywhere"
+   ```
 
 2. **Spawn workers with explicit ownership:**
    ```bash
@@ -89,7 +95,17 @@ Workers may run on a different harness than the lead; reporting uses only `xirp 
 
 ## Invariants
 
-- State: `~/.local/state/xirp-hierarchy/<lead-id>/` (`charter.md`, `tasks.json`, `logs/`). Every write is locked, validated, and atomic; never edit `tasks.json` by hand while workers run.
+- State: `~/.local/state/xirp-hierarchy/<lead-id>/` (`state.db`, `charter.md`, `logs/`). `state.db` is SQLite in WAL mode; multi-step writes are transactions. `dump` prints it as JSON. Never edit it by hand.
+
+## Shared context pool
+
+A lead-curated store of decisions, interfaces, gotchas, and findings, in `state.db` with full-text search.
+
+- **Lead** `ctx add` → approved immediately; re-using a key supersedes the old entry. Add `--broadcast` when running workers must react now.
+- **Worker** `ctx add` → `proposed`; the lead gets a `[WORKER PROPOSAL]` message and runs `ctx approve <id>` or `ctx reject <id> "why"`. Proposals are not binding and are excluded from search and the charter.
+- Approved entries are rendered into the charter's **Shared context** section, so workers get them by reading the charter. `ctx search "words"` (max 20 results, default 5) is for targeted lookups.
+- Keep entries short (2000-character cap). Point to files instead of pasting code. It is not a chat channel: questions still go through `report QUESTION`.
+- Answering a worker question that affects others? Answer with `tell`, then `ctx add --kind decision` so the answer is binding for everyone.
 - `--parent` is the reporting edge; `--after` / `--depends-on` is the sequencing edge.
 - A worker's claim that tests pass is not evidence; only `verify` records are.
 - If a session stalls at a harness trust prompt, follow the `xirp` skill and ask the user before accepting trust.
