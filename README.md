@@ -50,7 +50,8 @@ Workers call `scripts/hierarchy.sh report READY|QUESTION|BLOCKED|PROGRESS "…"`
 | File ownership | `spawn --owns`; overlaps refused unless sequenced with `--after`; `accept` rejects out-of-scope diffs |
 | Verifiable acceptance | `verify` records SHA, command, exit code, log; `accept` requires a clean tree and a passing run at HEAD; any new commit makes it stale |
 | Integration | merges the accepted SHA (not the branch tip), aborts on conflict, re-runs tests; `deploy-check` gates deploy |
-| Safe completion | `finish` refuses with unintegrated work; dirty worktrees and unmerged branches are never deleted |
+| Safe completion | `finish` refuses with unintegrated work; worktrees with tracked changes and unmerged branches are never deleted; untracked-only worktrees need `--discard-untracked` |
+| Stall detection | `status` flags `STALLED` when a worker produced no tokens for 3+ min (typically stuck on an interactive dialog) |
 | Bounded coordination | max workers, minutes and cost per worker, enforced at spawn and flagged in `status` |
 | Deployment | lead only; charter defaults to `Pre-authorised by user: no` |
 
@@ -67,7 +68,7 @@ skills/xirp-hierarchy/
     ├── lead-protocol.md
     └── worker-protocol.md
 install.sh
-tests/run.sh                     # 69 checks against a mock xirp + real git repo
+tests/run.sh                     # 85 checks against a mock xirp + real git repo
 ```
 
 ## Test
@@ -80,3 +81,7 @@ tests/run.sh /bin/bash  # macOS bash 3.2
 ## License
 
 MIT
+
+## Tested live
+
+Besides the mock suite, a two-worker run against real xirp/Claude Code sessions ran end to end: spawn → worker interface proposals → lead approval → READY → verify → accept → integrate (27 tests on the merged result) → deploy-check → cleanup. It took about 14 minutes and $1.50. Bugs it surfaced (workers created in the wrong project, test artefacts blocking gates, undetected stalls) are fixed and covered by tests.

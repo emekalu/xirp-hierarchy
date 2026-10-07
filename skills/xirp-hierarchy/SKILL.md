@@ -49,15 +49,20 @@ scripts/hierarchy.sh whoami     # lead <id> | worker <id> (lead: <id>) | none
    ```
    `spawn` refuses if the owned paths overlap another active worker (unless sequenced with `--after` that worker) or if the worker cap is reached. Each worker gets the brief, `--parent <lead>`, and its own branch and worktree.
 
-3. **Monitor:** `status` shows session state, HEAD, elapsed minutes, cost, and flags (`STALE_ACCEPTANCE`, `DIRTY`, `UNVERIFIED`, `OVER_TIME`, `OVER_COST`). `inbox` lists reports. Answer questions with `tell`; act on `OVER_*` with `tell` or `cancel`.
+3. **Monitor:** `status` shows session state, HEAD, elapsed minutes, cost, and flags (`STALE_ACCEPTANCE`, `DIRTY`, `UNVERIFIED`, `OVER_TIME`, `OVER_COST`, `STALLED`, `WAITING:*`). `inbox` lists reports. Answer questions with `tell`; act on `OVER_*` with `tell` or `cancel`.
+
+   `STALLED` means the agent has produced no tokens after 3+ minutes. Usually the worker terminal is stuck on an interactive prompt (Claude Code's "new MCP servers found" or folder-trust dialog). Inspect it with `tmux capture-pane -p -t xirp-<session-id>` and tell the user. Only dismiss it yourself if the user agrees.
 
 4. **Review gate**, per worker after a `READY` report:
    ```bash
    scripts/hierarchy.sh review api     # commits, diff stat, scope check, last verification
    scripts/hierarchy.sh verify api     # lead runs the test command in the worker's worktree
+   scripts/hierarchy.sh verify api --clean-checkout   # exact: runs on a detached checkout of HEAD
    scripts/hierarchy.sh accept api --note "..."   |   reject api "what to fix"
    ```
-   `accept` refuses unless the tree is clean, the latest verification passed at the current HEAD with the current test command, and all changes are within the owned paths. Override the scope check only with `--allow-out-of-scope "reason"`. Acceptance records the SHA; any later commit marks it stale and blocks integration.
+   `accept` refuses unless tracked files are unmodified, the latest verification passed at the current HEAD with the current test command, and all changes are within the owned paths. Override the scope check only with `--allow-out-of-scope "reason"`. Acceptance records the SHA; any later commit marks it stale and blocks integration.
+
+   Untracked files (`__pycache__`, coverage, build output) don't block anything, because they aren't part of the SHA. But an untracked *source* file can make in-place tests pass while the commit lacks it. `verify` warns about untracked files; use `--clean-checkout` when in doubt (the test command must then install its own dependencies). The integration test run is the final backstop.
 
 5. **Integrate and deploy (lead only)**, from the lead checkout on the base branch:
    ```bash
@@ -68,16 +73,16 @@ scripts/hierarchy.sh whoami     # lead <id> | worker <id> (lead: <id>) | none
 
 6. **Finish:**
    ```bash
-   scripts/hierarchy.sh finish --cleanup [--delete-branches]
+   scripts/hierarchy.sh finish --cleanup [--delete-branches] [--discard-untracked]
    ```
-   Refuses if any task is unintegrated or a branch has commits missing from the base branch. `--force` overrides that, but worktrees with uncommitted changes are never deleted and unmerged branches are never deleted.
+   Refuses if any task is unintegrated or a branch has commits missing from the base branch. `--force` overrides that. Worktrees with modified tracked files are never deleted, and unmerged branches are never deleted. Worktrees containing only untracked files are kept unless you inspect the listed files and pass `--discard-untracked`.
 
 ## Worker workflow
 
 If `whoami` says `worker`, follow `references/worker-protocol.md`. In short: read the charter, change only your owned paths, commit, run the test command, then report:
 
 ```bash
-scripts/hierarchy.sh report READY "what changed; test result"     # refused if uncommitted changes
+scripts/hierarchy.sh report READY "what changed; test result"     # refused if tracked files are uncommitted; warns on untracked
 scripts/hierarchy.sh report QUESTION "..."  |  report BLOCKED "..."  |  report PROGRESS "..."
 ```
 
@@ -91,7 +96,7 @@ The skill is identical for pi, Claude Code, and Codex.
 - **Claude Code**: path `~/.claude/skills/xirp-hierarchy`; run the helper with the Bash tool. Only pass `--harness claude --auto-mode` to `spawn` if the user asks for unattended workers.
 - **Codex**: path `~/.codex/skills/xirp-hierarchy`. If a command fails with `Could not connect to Chirp daemon`, retry it with local network approval. Do not switch edition or daemon.
 
-Workers may run on a different harness than the lead; reporting uses only `xirp session message` and the shared state file.
+Workers may run on a different harness than the lead; reporting uses only `xirp session message` and the shared state database.
 
 ## Invariants
 

@@ -179,16 +179,21 @@ base_ref() { # repo-dir base -> ref
   else die "base branch '$2' not found from $1"; fi
 }
 
-wt_facts() { # wt base -> {exists, head, dirty, ahead, merged}
+# dirty    = anything uncommitted, incl. untracked files (used for deletion safety)
+# modified = tracked changes only (used for review gates; untracked test artefacts are not part of a SHA)
+wt_facts() { # wt base -> {exists, head, dirty, modified, untracked, ahead, merged}
   local wt="$1" base="$2" b merged
   if [[ -z "$wt" || ! -d "$wt" ]]; then echo '{"exists":false}'; return; fi
   b="$(base_ref "$wt" "$base")"
   if git -C "$wt" merge-base --is-ancestor HEAD "$b"; then merged=true; else merged=false; fi
   jq -nc --arg head "$(git -C "$wt" rev-parse HEAD)" \
         --arg dirty "$(git -C "$wt" status --porcelain)" \
+        --arg mod "$(git -C "$wt" status --porcelain --untracked-files=no)" \
+        --arg untr "$(git -C "$wt" ls-files --others --exclude-standard | head -n 20)" \
         --arg ahead "$(git -C "$wt" rev-list --count "$b..HEAD")" \
         --argjson merged "$merged" \
-        '{exists:true, head:$head, dirty:($dirty!=""), ahead:($ahead|tonumber), merged:$merged}'
+        '{exists:true, head:$head, dirty:($dirty!=""), modified:($mod!=""),
+          untracked:($untr|split("\n")|map(select(.!=""))), ahead:($ahead|tonumber), merged:$merged}'
 }
 
 changed_files() { # wt base

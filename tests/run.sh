@@ -87,18 +87,39 @@ check "tasks table intact" st -e '.tasks|length==2'
 for i in $(seq 1 15); do ( CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" ctx add --kind finding --key "f$i" "finding $i" >/dev/null 2>&1 ) & done; wait
 check "15 concurrent proposals recorded" bash -c "[ \$(sqlite3 '$T/state/lead-0000-test/state.db' \"select count(*) from context where key like 'f%' and status='proposed'\") -eq 15 ]"
 
+echo "status flags"
+OLD="$(date -u -v-10M +%FT%TZ 2>/dev/null || date -u -d '10 min ago' +%FT%TZ)"
+DB "update tasks set created_at='$OLD' where name='api2'"
+check "STALLED when no tokens after 3 min" bash -c "$BASH_BIN '$H' status --json | jq -e '.[]|select(.name==\"api2\")|.flags|index(\"STALLED\")'"
+F="$MOCK_DIR/sessions/$(st -r '.tasks[1].id').json"; jq '.inputTokens=10|.outputTokens=5|.totalCostUsd=9' "$F" >"$F.tmp" && mv "$F.tmp" "$F"
+check "not STALLED once tokens flow" bash -c "! $BASH_BIN '$H' status --json | jq -e '.[]|select(.name==\"api2\")|.flags|index(\"STALLED\")'"
+check "OVER_COST flagged" bash -c "$BASH_BIN '$H' status --json | jq -e '.[]|select(.name==\"api2\")|.flags|index(\"OVER_COST\")'"
+
 echo "verification gate"
 commit_in "$WT" src/api/a.txt
-echo dirt >"$WT/src/api/dirty.txt"
-refuse "READY refused with uncommitted changes" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" report READY done
-rm "$WT/src/api/dirty.txt"
+echo edit >>"$WT/src/api/a.txt"
+refuse "READY refused with modified tracked file" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" report READY done
+(cd "$WT" && git checkout -q src/api/a.txt)
+echo junk >"$WT/src/api/artefact.pyc"
+check "READY allowed with untracked artefact (warns)" bash -c "CHIRP_SESSION_ID='$API' $BASH_BIN '$H' report READY done 2>&1 | grep -q 'NOT part of your commit'"
+rm "$WT/src/api/artefact.pyc"
 check "READY with clean tree" env CHIRP_SESSION_ID="$API" "$BASH_BIN" "$H" report READY done
 refuse "accept before verify refused" h accept api
 commit_in "$WT" FAIL
 refuse "verify fails when tests fail" h verify api
 refuse "accept after failing verify refused" h accept api
 (cd "$WT" && git rm -q FAIL && git commit -qm unfail)
+touch "$WT/FAIL"
+refuse "in-place verify sees untracked file" h verify api
+check "--clean-checkout verifies the commit only" h verify api --clean-checkout
+check "clean checkout removed" bash -c "! git -C '$WT' worktree list | grep -q xh-verify"
+rm "$WT/FAIL"
+check "test-created artefacts don't break consistency" h config --test-cmd 'test ! -e FAIL && touch build.out'
 check "verify passes" h verify api
+check "verification consistent despite artefact" st -e '.tasks[0].verifications|last|.consistent and .clean'
+h config --test-cmd 'test ! -e FAIL' >/dev/null; rm -f "$WT/build.out"
+refuse "accept refused: verification used an old test command" h accept api
+check "re-verify with current command" h verify api
 check "verification records sha+exit" st -e --arg h "$(git -C "$WT" rev-parse HEAD)" '.tasks[0].verifications|last|.sha==$h and .exitCode==0'
 check "accept" h accept api --note lgtm
 check "acceptance bound to sha" st -e --arg h "$(git -C "$WT" rev-parse HEAD)" '.tasks[0].acceptance.sha==$h'
@@ -129,7 +150,8 @@ check "task marked integrated" st -e '.tasks[0].status=="integrated" and .tasks[
 refuse "deploy-check still fails (api2 open)" h deploy-check
 check "verify api2" h verify api2
 check "accept api2" h accept api2
-check "integrate api2" h integrate
+touch "$MOCK_REPO/artefact.untracked"
+check "integrate api2 (untracked artefact in lead checkout ok)" h integrate
 check "deploy-check passes" h deploy-check
 
 echo "cleanup"
@@ -138,6 +160,12 @@ check "finish --cleanup with dirty worktree completes but keeps it" h finish --c
 check "dirty worktree kept" test -d "$WT2"
 check "clean merged worktree deleted" test ! -d "$WT"
 check "merged branch deleted" bash -c "! git -C '$MOCK_REPO' rev-parse --verify -q refs/heads/hier/api"
+echo edit >>"$WT2/src/api/v2/c.txt"
+check "finish --discard-untracked still keeps tracked changes" h finish --cleanup --discard-untracked
+check "worktree with tracked changes kept" test -d "$WT2"
+(cd "$WT2" && git checkout -q src/api/v2/c.txt)
+check "finish --discard-untracked removes untracked-only worktree" h finish --cleanup --discard-untracked --delete-branches
+check "untracked-only worktree deleted" test ! -d "$WT2"
 
 echo
 echo "$pass passed, $fail failed"

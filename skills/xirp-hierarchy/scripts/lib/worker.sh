@@ -31,12 +31,14 @@ cmd_report() {
   wt="$(jq -r '.worktreePath // empty' <<<"$sj")"
   [[ -n "$wt" ]] || wt="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   if [[ -n "$wt" && -d "$wt" ]]; then
-    sha="$(git -C "$wt" rev-parse HEAD)"; dirty="$(git -C "$wt" status --porcelain)"
+    sha="$(git -C "$wt" rev-parse HEAD)"; dirty="$(git -C "$wt" status --porcelain --untracked-files=no)"
   fi
 
   if [[ "$kind" == "READY" ]]; then
     [[ -n "$sha" ]] || die "cannot locate your worktree to record the commit"
-    [[ -z "$dirty" ]] || die "uncommitted changes; commit (or discard) everything before reporting READY"
+    [[ -z "$dirty" ]] || die "uncommitted changes to tracked files; commit (or discard) them before reporting READY"
+    local untr; untr="$(git -C "$wt" ls-files --others --exclude-standard | head -n 10)"
+    if [[ -n "$untr" ]]; then warn "untracked files are NOT part of your commit (git add them if they are source): $(echo $untr)"; fi
   fi
 
   "$XIRP" session message "$LEAD" "[WORKER $kind] $name (${me:0:8}, $branch @ ${sha:0:8}): $text" --from "$me"

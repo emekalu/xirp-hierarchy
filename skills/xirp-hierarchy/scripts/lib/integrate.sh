@@ -18,7 +18,7 @@ cmd_integrate() {
   local base cur
   base="$(state -r .baseBranch)"; cur="$(git -C "$repo" branch --show-current)"
   [[ "$cur" == "$base" ]] || die "$repo is on '$cur'; check out the integration branch '$base' first"
-  [[ -z "$(git -C "$repo" status --porcelain)" ]] || die "$repo has uncommitted changes"
+  [[ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ]] || die "$repo has uncommitted changes to tracked files"
 
   local pending
   pending="$(state -r --argjson a "$ACTIVE" '.tasks[] | select(.status as $s | $a | index($s)) | "\(.name) (\(.status))"')"
@@ -96,7 +96,7 @@ cmd_deploy_check() {
   local head problems="" open run
   head="$(git -C "$repo" rev-parse HEAD)"
   [[ "$(git -C "$repo" branch --show-current)" == "$(state -r .baseBranch)" ]] || problems+="  - not on the integration branch"$'\n'
-  [[ -z "$(git -C "$repo" status --porcelain)" ]] || problems+="  - uncommitted changes in $repo"$'\n'
+  [[ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ]] || problems+="  - uncommitted changes to tracked files in $repo"$'\n'
   open="$(state -r '.tasks[] | select(.status!="integrated" and .status!="cancelled") | "\(.name) (\(.status))"')"
   if [[ -n "$open" ]]; then problems+="  - tasks not integrated: $(tr '\n' ' ' <<<"$open")"$'\n'; fi
   run="$(state -c --arg h "$head" '[.integrationRuns[] | select(.sha==$h)] | last // empty')"
@@ -109,10 +109,11 @@ cmd_deploy_check() {
 }
 
 cmd_finish() {
-  local cleanup=0 delbranch=0 force=0
+  local cleanup=0 delbranch=0 force=0 discard=0
   while [[ $# -gt 0 ]]; do case "$1" in
     --lead) LEAD="$2"; shift 2;;  --cleanup) cleanup=1; shift;;
     --delete-branches) delbranch=1; shift;;  --force) force=1; shift;;
+    --discard-untracked) discard=1; shift;;
     *) die "finish: unknown option $1";; esac; done
   LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
 
@@ -125,8 +126,12 @@ cmd_finish() {
     facts="$(wt_facts "$wt" "$(jq -r .base <<<"$t")" 2>/dev/null || echo '{"exists":false}')"
     if [[ "$st" != "integrated" && "$st" != "cancelled" ]]; then soft+="  - '$name' is $st, not integrated"$'\n'; fi
     if jq -e .exists <<<"$facts" >/dev/null; then
-      if jq -e .dirty <<<"$facts" >/dev/null; then
-        hard+="  - '$name' has uncommitted changes in $wt (will not be deleted)"$'\n'; continue
+      # tracked changes: never deleted. untracked-only (build/test artefacts): only with --discard-untracked
+      if jq -e .modified <<<"$facts" >/dev/null; then
+        hard+="  - '$name' has uncommitted changes to tracked files in $wt (will not be deleted)"$'\n'; continue
+      fi
+      if jq -e .dirty <<<"$facts" >/dev/null && [[ $discard -eq 0 ]]; then
+        hard+="  - '$name' has untracked files in $wt: $(git -C "$wt" status --porcelain | sed 's/^?? //' | head -n 8 | tr '\n' ' ')(inspect, then --discard-untracked)"$'\n'; continue
       fi
       if ! jq -e '.merged or .ahead==0' <<<"$facts" >/dev/null; then
         soft+="  - '$name' has $(jq -r .ahead <<<"$facts") commit(s) not in the base branch"$'\n'
@@ -155,6 +160,10 @@ cmd_finish() {
       args+=(--delete-branch)
     fi
     "$XIRP" session stop "$id" >/dev/null 2>&1 || true
+    # --discard-untracked: tracked state was verified unmodified above; drop untracked/ignored files explicitly
+    if [[ $discard -eq 1 ]] && jq -e .exists <<<"$facts" >/dev/null; then
+      git -C "$(worktree_of "$id")" clean -fdxq || warn "could not clean untracked files for ${id:0:8}"
+    fi
     if "$XIRP" "${args[@]}" >/dev/null 2>&1; then echo "deleted session ${id:0:8} ($(jq -r .name <<<"$t"))"
     else warn "could not delete session ${id:0:8}"; fi
   done <<<"$deletable"

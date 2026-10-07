@@ -183,10 +183,14 @@ enriched_tasks() { # -> JSON array of tasks with live session + git facts and fl
       | . + {sessionStatus: ($s.status // "unknown"), worktreePath: $wt, git: $f, minutes: $mins, costUsd: $cost,
              flags: [
                (if .acceptance != null and $f.exists and $f.head != .acceptance.sha then "STALE_ACCEPTANCE" else empty end),
-               (if $f.exists and $f.dirty then "DIRTY" else empty end),
+               (if $f.exists and $f.modified then "DIRTY" else empty end),
                (if .status=="ready" and $f.exists and ($v == null or $v.sha != $f.head) then "UNVERIFIED" else empty end),
                (if ($A|index($t.status)) and $mins > $L.maxMinutes then "OVER_TIME" else empty end),
-               (if $cost > $L.maxCostUsd then "OVER_COST" else empty end)
+               (if $cost > $L.maxCostUsd then "OVER_COST" else empty end),
+               # agent never produced a token: usually an interactive prompt (MCP/trust dialog) in the worker terminal
+               (if ($A|index($t.status)) and $mins >= 3 and ($s.status // "") == "running"
+                   and (($s.inputTokens // 0) + ($s.outputTokens // 0)) == 0 then "STALLED" else empty end),
+               (if $s.waitingReason then "WAITING:" + ($s.waitingReason|tostring) else empty end)
              ]}' <<<"$t"
   done < <(state -r '.tasks[].id') | jq -s .
 }

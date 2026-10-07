@@ -46,7 +46,7 @@ Lead (run inside the lead session, or pass --lead <id>):
   integrate [--repo P] [--dry-run] [--order a,b]
                                      merge each accepted SHA (not branch tip) into the base branch, then run tests
   deploy-check [--repo P]            pass only if every task is integrated and tests passed at current HEAD
-  finish [--cleanup] [--delete-branches] [--force]
+  finish [--cleanup] [--delete-branches] [--discard-untracked] [--force]
                                      refuses on uncommitted or unintegrated work unless --force (dirty is never deleted)
   charter                            print charter path
   dump                               whole state as JSON (read-only)

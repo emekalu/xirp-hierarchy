@@ -38,25 +38,40 @@ cmd_review() {
 
 cmd_verify() {
   if [[ "${1:-}" == "--lead" ]]; then LEAD="$2"; shift 2; fi
-  [[ -n "${1:-}" ]] || die "usage: verify <worker>"
+  local fresh=0 ref=""
+  while [[ $# -gt 0 ]]; do case "$1" in
+    --clean-checkout) fresh=1; shift;;  -*) die "verify: unknown option $1";;  *) ref="$1"; shift;; esac; done
+  [[ -n "$ref" ]] || die "usage: verify <worker> [--clean-checkout]"
   LEAD="$(resolve_lead "$LEAD")"; require_lead "run this command"
-  local id t tc wt facts head clean log start rc consistent=true
-  id="$(resolve_worker "$1")"; t="$(task_json "$id")"
+  local id t tc wt facts head clean log start rc consistent=true run_dir
+  id="$(resolve_worker "$ref")"; t="$(task_json "$id")"
   tc="$(state -r '.testCommand // ""')"
   [[ -n "$tc" ]] || die "no test command set; run: config --test-cmd \"...\""
   wt="$(worktree_of "$id")"
   facts="$(wt_facts "$wt" "$(jq -r .base <<<"$t")")"
   jq -e .exists <<<"$facts" >/dev/null || die "worker worktree not found (${wt:-unknown})"
   head="$(jq -r .head <<<"$facts")"
-  clean="$(jq -r 'if .dirty then "false" else "true" end' <<<"$facts")"
-  if [[ "$clean" == "false" ]]; then warn "worktree has uncommitted changes; this run is recorded but cannot back an acceptance"; fi
+  clean="$(jq -r 'if .modified then "false" else "true" end' <<<"$facts")"
+  run_dir="$wt"
+  if [[ $fresh -eq 1 ]]; then
+    # exact verification: detached checkout of HEAD, nothing uncommitted can leak in (deps must be installed by the test command)
+    clean=true; run_dir="$(mktemp -d "${TMPDIR:-/tmp}/xh-verify.XXXXXX")"
+    git -C "$wt" worktree add -q --detach "$run_dir" "$head" || die "could not create clean checkout"
+  else
+    if [[ "$clean" == "false" ]]; then warn "tracked files modified; this run is recorded but cannot back an acceptance"; fi
+    if [[ "$(jq '.untracked|length' <<<"$facts")" != "0" ]]; then
+      warn "untracked files present (not part of the commit, may hide a missing 'git add'; --clean-checkout rules this out): $(jq -r '.untracked|join(" ")' <<<"$facts")"
+    fi
+  fi
   mkdir -p "$STATE_ROOT/$LEAD/logs"
   log="$STATE_ROOT/$LEAD/logs/${id:0:8}-${head:0:12}-$(date +%s).log"
   start="$(now)"
-  echo "running in $wt: $tc"
-  rc="$(run_logged "$wt" "$log" "$tc")"
+  echo "running in $run_dir: $tc"
+  rc="$(run_logged "$run_dir" "$log" "$tc")"
+  if [[ $fresh -eq 1 ]]; then git -C "$wt" worktree remove --force "$run_dir" >/dev/null 2>&1 || rm -rf "$run_dir"; fi
   if [[ "$(git -C "$wt" rev-parse HEAD)" != "$head" ]]; then consistent=false; fi
-  if [[ "$clean" == "true" && -n "$(git -C "$wt" status --porcelain)" ]]; then consistent=false; fi
+  # test runs may create untracked artefacts (__pycache__, coverage); only tracked changes break consistency
+  if [[ $fresh -eq 0 && "$clean" == "true" && -n "$(git -C "$wt" status --porcelain --untracked-files=no)" ]]; then consistent=false; fi
   if [[ "$consistent" == "false" ]]; then warn "HEAD or worktree changed during the run; result cannot back an acceptance"; fi
   tail -n 15 "$log" | sed 's/^/  | /'
   local fin; fin="$(now)"
@@ -84,7 +99,7 @@ cmd_accept() {
   head="$(jq -r .head <<<"$facts")"
   tc="$(state -r '.testCommand // ""')"
 
-  if jq -e .dirty <<<"$facts" >/dev/null; then problems+="  - worktree has uncommitted changes"$'\n'; fi
+  if jq -e .modified <<<"$facts" >/dev/null; then problems+="  - tracked files have uncommitted changes"$'\n'; fi
   if [[ "$(jq -r .ahead <<<"$facts")" == "0" ]]; then problems+="  - branch has no commits ahead of $base"$'\n'; fi
   v="$(jq -c '.verifications | last // empty' <<<"$t")"
   if [[ -z "$v" ]]; then
