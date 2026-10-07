@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Link the xirp-hierarchy skill into pi, Claude Code, and Codex skill directories.
-# Usage: ./install.sh [pi|claude|codex ...]   (default: all)
+# Usage: ./install.sh [pi|claude|codex ...]        (default: all)
 #        ./install.sh --uninstall [targets...]
 set -euo pipefail
 
@@ -8,11 +8,13 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$REPO_DIR/skills/xirp-hierarchy"
 NAME="xirp-hierarchy"
 
-declare -A DEST=(
-  [pi]="$HOME/.pi/skills"
-  [claude]="$HOME/.claude/skills"
-  [codex]="$HOME/.codex/skills"
-)
+dest_for() {
+  case "$1" in
+    pi) echo "$HOME/.pi/skills";;
+    claude) echo "$HOME/.claude/skills";;
+    codex) echo "$HOME/.codex/skills";;
+  esac
+}
 
 uninstall=0
 targets=()
@@ -28,7 +30,7 @@ done
 chmod +x "$SRC/scripts/hierarchy.sh"
 
 for t in "${targets[@]}"; do
-  dir="${DEST[$t]}"; link="$dir/$NAME"
+  dir="$(dest_for "$t")"; link="$dir/$NAME"
   if [[ $uninstall -eq 1 ]]; then
     if [[ -L "$link" ]]; then rm "$link"; echo "removed  $link"; else echo "skip     $link (not a symlink)"; fi
     continue

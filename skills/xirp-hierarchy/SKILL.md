@@ -1,122 +1,95 @@
 ---
 name: xirp-hierarchy
-description: 'Run a lead/worker agent hierarchy over xirp sessions. The first session becomes the lead: it writes a charter (conventions, test and deploy rules), spawns worker sessions in isolated worktrees, receives their reports, reviews and tests their branches, and owns integration and deployment. Use when the user wants to split work across multiple agents while keeping one session in charge of consistency, testing, and deployment.'
+description: 'Run a bounded lead/worker agent hierarchy over xirp sessions. The first session becomes the lead: it writes a charter, spawns 2–3 worker sessions with explicit file ownership in isolated worktrees, verifies each worker branch by running tests itself (acceptance is pinned to a commit SHA), integrates the accepted commits, and owns deployment. Use when the user wants to split work across multiple agents while one session stays in charge of consistency, testing, and deployment.'
 ---
 
 # xirp-hierarchy
 
-One session leads; others work. The lead never writes feature code in parallel with workers — it plans, briefs, reviews, tests, integrates, and deploys. Workers never merge or deploy — they implement in their own worktree and report back.
+One session leads; a few others work. The lead plans, briefs, verifies, integrates, and deploys. Workers implement one scoped task in their own worktree and report back. They never merge or deploy.
 
-Helper script: `scripts/hierarchy.sh` (relative to this skill directory). Run `scripts/hierarchy.sh help` for usage. It wraps `xirp` and `jq`; it never calls `xirp update`.
+Helper: `scripts/hierarchy.sh` (relative to this skill directory). Run `scripts/hierarchy.sh help` for the full command list. It needs `xirp`, `jq`, `git`, and either `flock` or `perl`. It never calls `xirp update`.
 
-Read `references/lead-protocol.md` when acting as lead. Read `references/worker-protocol.md` when acting as worker (the worker brief also points there).
+Read `references/lead-protocol.md` when acting as lead and `references/worker-protocol.md` when acting as worker.
+
+## First: is a hierarchy worth it?
+
+Coordination costs real tokens and time: decomposition, a fresh context load per worker, review, verification, and integration. Use a hierarchy only when **all** of these hold:
+
+- the work splits into 2–3 tasks that touch **disjoint files** (or can be strictly sequenced);
+- each task is substantial (roughly 30+ minutes of agent work), not a one-file tweak;
+- interfaces between tasks are clear enough to write down before workers start;
+- there is a runnable test command that meaningfully checks each task.
+
+If any fails, tell the user and do the work in a single session. Start with 2 workers; the default cap is 3.
 
 ## Which role am I?
 
 ```bash
-scripts/hierarchy.sh whoami
+scripts/hierarchy.sh whoami     # lead <id> | worker <id> (lead: <id>) | none
 ```
-
-- `lead` — this session (`$CHIRP_SESSION_ID`) has a charter under `~/.local/state/xirp-hierarchy/<id>/`.
-- `worker` — this session's `parentSessionId` is a lead, or its goal contains `XIRP-HIERARCHY WORKER BRIEF`.
-- `none` — no hierarchy yet. If the user asks for one, this session becomes the lead.
-
-Outside a managed session (`$CHIRP_SESSION_ID` unset) you can still run the lead workflow by passing `--lead <session-id>`, but prefer running it from inside the lead session so messages route correctly.
 
 ## Lead workflow
 
-### 1. Initialise (first session only)
-
-```bash
-scripts/hierarchy.sh init
-```
-
-This tags the current session `role:lead` and writes `charter.md` from `assets/charter-template.md`. Then **edit the charter** with the user before spawning anyone. The charter is the single source of truth for:
-
-- coding conventions, file layout, naming
-- the exact test command(s) a worker must pass before reporting
-- the integration branch and whether workers may push
-- what is forbidden for workers (deploy, merge, touch CI/infra, change shared interfaces without asking)
-
-Ask the user concise questions only for things the repo does not already answer (e.g. look for `package.json` scripts, `Makefile`, CI config, `CONTRIBUTING.md` first).
-
-### 2. Plan the split
-
-Break the goal into worker tasks that are **independent in files touched**. Record them in the charter's task table. If two tasks must touch the same file, sequence them with `--after` (dependency edge) rather than running them in parallel.
-
-### 3. Spawn workers
-
-```bash
-scripts/hierarchy.sh spawn --name "auth: add refresh tokens" \
-  --branch jd/auth-refresh \
-  --goal "Implement refresh-token rotation in src/auth. Add unit tests in tests/auth."
-
-# sequenced worker: queues until the named worker/session finishes
-scripts/hierarchy.sh spawn --name "auth: wire refresh into client" \
-  --after jd/auth-refresh --goal "..."
-```
-
-`spawn` prepends the worker brief (`assets/worker-brief.md`, with the charter path and lead id substituted), sets `--parent` to the lead so messages route back, tags `role:worker lead:<id>`, and creates an isolated worktree from the charter's base branch. Do not add `--harness`/`--model` unless the user asked.
-
-### 4. Monitor and respond
-
-```bash
-scripts/hierarchy.sh status          # table of workers: status, branch, last message
-scripts/hierarchy.sh inbox           # reports workers sent to the lead (from the lead's transcript)
-scripts/hierarchy.sh tell <worker> "message"   # answer a question / redirect a worker
-scripts/hierarchy.sh broadcast "message"       # same to all running workers
-```
-
-Workers report with a fixed header (`[WORKER REPORT]`, `[WORKER QUESTION]`, `[WORKER BLOCKED]`). When one arrives in this session's transcript, act on it: answer questions quickly, and start a review when a report says `READY`.
-
-### 5. Review and test each worker branch
-
-```bash
-scripts/hierarchy.sh review <worker>
-```
-
-This prints the branch diff against the base branch and the worktree path. Then, as lead:
-
-1. Read the diff for charter compliance (conventions, scope, tests present).
-2. Run the charter's test command **in the worker's worktree** (path is printed). Do not trust the worker's claim.
-3. Either `tell <worker>` what to fix and wait for a new report, or mark it accepted:
+1. **Initialise** (first session only):
    ```bash
-   scripts/hierarchy.sh accept <worker>
+   scripts/hierarchy.sh init --test-cmd "npm test" [--max-workers 3 --max-minutes 120 --max-cost 10]
    ```
+   Fill `charter.md` from the repo (lint config, CI, CONTRIBUTING, existing patterns). Ask the user only what the repo cannot answer. The test command in `tasks.json` is the one that is actually executed; change it with `config --test-cmd`.
 
-### 6. Integrate and deploy (lead only)
+2. **Spawn workers with explicit ownership:**
+   ```bash
+   scripts/hierarchy.sh spawn --name api --owns src/api,tests/api --goal "..."
+   scripts/hierarchy.sh spawn --name client --owns src/client --after api --goal "..."
+   ```
+   `spawn` refuses if the owned paths overlap another active worker (unless sequenced with `--after` that worker) or if the worker cap is reached. Each worker gets the brief, `--parent <lead>`, and its own branch and worktree.
 
-Once all tasks are accepted, integrate in the lead's own checkout in the order recorded in the charter, run the full test suite once more on the integrated result, then follow the charter's deploy procedure. Ask the user before any deploy that is not explicitly pre-authorised in the charter.
+3. **Monitor:** `status` shows session state, HEAD, elapsed minutes, cost, and flags (`STALE_ACCEPTANCE`, `DIRTY`, `UNVERIFIED`, `OVER_TIME`, `OVER_COST`). `inbox` lists reports. Answer questions with `tell`; act on `OVER_*` with `tell` or `cancel`.
 
-```bash
-scripts/hierarchy.sh finish        # marks hierarchy done; optionally stops/deletes workers with --cleanup
-```
+4. **Review gate**, per worker after a `READY` report:
+   ```bash
+   scripts/hierarchy.sh review api     # commits, diff stat, scope check, last verification
+   scripts/hierarchy.sh verify api     # lead runs the test command in the worker's worktree
+   scripts/hierarchy.sh accept api --note "..."   |   reject api "what to fix"
+   ```
+   `accept` refuses unless the tree is clean, the latest verification passed at the current HEAD with the current test command, and all changes are within the owned paths. Override the scope check only with `--allow-out-of-scope "reason"`. Acceptance records the SHA; any later commit marks it stale and blocks integration.
+
+5. **Integrate and deploy (lead only)**, from the lead checkout on the base branch:
+   ```bash
+   scripts/hierarchy.sh integrate [--dry-run]    # merges each *accepted SHA*, then runs tests
+   scripts/hierarchy.sh deploy-check             # all tasks integrated + tests passed at HEAD
+   ```
+   Then follow the charter's Deployment section. Ask the user before deploying unless the charter says `Pre-authorised by user: yes`.
+
+6. **Finish:**
+   ```bash
+   scripts/hierarchy.sh finish --cleanup [--delete-branches]
+   ```
+   Refuses if any task is unintegrated or a branch has commits missing from the base branch. `--force` overrides that, but worktrees with uncommitted changes are never deleted and unmerged branches are never deleted.
 
 ## Worker workflow
 
-If `whoami` says `worker`, follow `references/worker-protocol.md`: read the charter at the path given in your brief, stay inside your assigned scope, run the charter's test command before reporting, and report to the lead with:
+If `whoami` says `worker`, follow `references/worker-protocol.md`. In short: read the charter, change only your owned paths, commit, run the test command, then report:
 
 ```bash
-scripts/hierarchy.sh report READY "summary of what changed and test results"
-scripts/hierarchy.sh report QUESTION "what you need decided"
-scripts/hierarchy.sh report BLOCKED "what is blocking you"
+scripts/hierarchy.sh report READY "what changed; test result"     # refused if uncommitted changes
+scripts/hierarchy.sh report QUESTION "..."  |  report BLOCKED "..."  |  report PROGRESS "..."
 ```
 
-Never merge, push to the integration branch, deploy, or change files outside your scope without a `QUESTION` → answer first.
+After `READY`, stop and wait. Any new commit invalidates an acceptance.
 
 ## Harness notes
 
-The skill is identical for pi, Claude Code, and Codex; only invocation differs.
+The skill is identical for pi, Claude Code, and Codex.
 
-- **pi** — force-load with `/skill:xirp-hierarchy`. Skill path: `~/.pi/skills/xirp-hierarchy`.
-- **Claude Code** — skill path: `~/.claude/skills/xirp-hierarchy`. Run the helper with the Bash tool. If you want workers on Claude too, spawn with the default harness (the user's xirp default); only pass `--harness claude --auto-mode` if the user asks for unattended workers.
-- **Codex** — skill path: `~/.codex/skills/xirp-hierarchy`. The command sandbox may block the local daemon: if a helper command fails with `Could not connect to Chirp daemon`, retry that same command with local network approval. Do not switch edition or daemon as a workaround.
+- **pi**: `/skill:xirp-hierarchy`; path `~/.pi/skills/xirp-hierarchy`.
+- **Claude Code**: path `~/.claude/skills/xirp-hierarchy`; run the helper with the Bash tool. Only pass `--harness claude --auto-mode` to `spawn` if the user asks for unattended workers.
+- **Codex**: path `~/.codex/skills/xirp-hierarchy`. If a command fails with `Could not connect to Chirp daemon`, retry it with local network approval. Do not switch edition or daemon.
 
-Workers may run on a different harness than the lead; the reporting protocol is harness-agnostic because it only uses `xirp session message`.
+Workers may run on a different harness than the lead; reporting uses only `xirp session message` and the shared state file.
 
-## Rules that hold for both roles
+## Invariants
 
-- All `xirp` calls use `~/.local/bin/xirp`; if it is missing say so rather than guessing at commands. Verify unusual commands with `xirp skill` first.
-- Hierarchy state lives in `~/.local/state/xirp-hierarchy/<lead-id>/` (`charter.md`, `tasks.json`). It is outside any worktree so every session can read it by absolute path.
-- The dependency edge (`--depends-on` / `--stack-parent`) is for *sequencing*; the messaging edge (`--parent`) is for *reporting*. Workers always get the messaging edge to the lead; they get a dependency edge only when `--after` is used.
-- If a worker session stalls at a harness trust prompt, follow the `xirp` skill's guidance and ask the user before accepting trust.
+- State: `~/.local/state/xirp-hierarchy/<lead-id>/` (`charter.md`, `tasks.json`, `logs/`). Every write is locked, validated, and atomic; never edit `tasks.json` by hand while workers run.
+- `--parent` is the reporting edge; `--after` / `--depends-on` is the sequencing edge.
+- A worker's claim that tests pass is not evidence; only `verify` records are.
+- If a session stalls at a harness trust prompt, follow the `xirp` skill and ask the user before accepting trust.

@@ -22,12 +22,13 @@ Created: {{CREATED_AT}}
 
 ## Testing
 
-- Required test command (workers must run this and paste the result in their READY report):
+- Required test command (executed by `verify` and `integrate`; change with `hierarchy.sh config --test-cmd`):
   ```bash
-  # e.g. npm test  |  pytest -q  |  go test ./...
+  {{TEST_CMD}}
   ```
 - Minimum expectation for new code: <!-- e.g. unit tests for every new public function -->
-- Lead runs the same command on each worker worktree before accepting, and on the integrated result before deploy.
+- Lead runs this in each worker worktree (`verify`) before `accept`; acceptance is pinned to that commit SHA.
+- `integrate` runs it again on the merged result; `deploy-check` requires that run to pass at HEAD.
 
 ## Deployment
 
@@ -36,27 +37,37 @@ Created: {{CREATED_AT}}
   ```bash
   # e.g. gh pr create ... ; ./scripts/deploy.sh staging
   ```
+- Gate: `hierarchy.sh deploy-check` must pass first.
 - Pre-authorised by user: `no`  <!-- change to `yes` only if the user explicitly says so -->
 - Rollback:
 
+## Limits
+
+- Max concurrent workers: {{MAX_WORKERS}}
+- Per worker: {{MAX_MINUTES}} minutes, ${{MAX_COST}} (flagged in `status` as OVER_TIME / OVER_COST)
+
+## Interfaces between tasks
+
+<!-- Write these BEFORE spawning: function signatures, API shapes, data formats, which task owns each. -->
+
 ## Worker rules
 
-1. Work only in your own worktree and only in the files/dirs listed for your task.
+1. Work only in your own worktree and only in your owned paths (`--owns`). `accept` rejects out-of-scope changes.
 2. Do not merge, rebase onto, or push to the integration branch. Commit on your own branch.
 3. Do not deploy, change CI, infra, secrets, or shared interfaces. Ask with `[WORKER QUESTION]` first.
-4. Run the required test command before every `READY` report. Paste the summary line.
+4. Commit everything and run the required test command before every `READY` report. After READY, stop: new commits invalidate acceptance.
 5. Report to the lead using `scripts/hierarchy.sh report`. Do not message other workers directly.
 6. If a dependency on another worker's output blocks you, report `BLOCKED` and wait.
 
 ## Tasks
 
-| # | Worker name | Branch | Scope (files/dirs) | Depends on | Status |
-|---|-------------|--------|--------------------|------------|--------|
+| # | Worker name | Branch | Owns (files/dirs) | After | Status |
+|---|-------------|--------|-------------------|-------|--------|
 |   |             |        |                    |            |        |
 
 ## Integration order
 
-<!-- Order the lead merges accepted branches. Usually matches dependency order. -->
+<!-- Default: spawn order. Override with `integrate --order a,b`. Accepted SHAs are merged, not branch tips. -->
 
 ## Decisions log
 

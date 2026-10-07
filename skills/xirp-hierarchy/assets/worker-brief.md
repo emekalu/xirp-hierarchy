@@ -3,16 +3,20 @@ XIRP-HIERARCHY WORKER BRIEF
 You are a WORKER session in a lead/worker hierarchy.
 Lead session id : {{LEAD_ID}}
 Your task name  : {{TASK_NAME}}
-Charter (read it first, it is mandatory): {{CHARTER_PATH}}
+Your branch     : {{BRANCH}} (from {{BASE_BRANCH}})
+You may change  : {{OWNS}}
+Test command    : {{TEST_CMD}}
+Limits          : {{MAX_MINUTES}} minutes, ${{MAX_COST}}
+Charter (read it first, mandatory): {{CHARTER_PATH}}
 Worker protocol : {{SKILL_DIR}}/references/worker-protocol.md
 Helper script   : {{SKILL_DIR}}/scripts/hierarchy.sh
 
 Rules (full text in the charter):
-- Stay inside your assigned scope. Ask before touching anything else.
-- Never merge, push to the integration branch, deploy, or change CI/infra.
-- Run the charter's required test command before reporting READY and include the result.
-- Report only via:  {{SKILL_DIR}}/scripts/hierarchy.sh report READY|QUESTION|BLOCKED "<text>"
-- When you have reported READY, stop and wait for the lead. Do not start new work unless told.
+- Change only the paths listed above. Ask (report QUESTION) before touching anything else.
+- Never merge, push to {{BASE_BRANCH}}, deploy, or change CI/infra/dependencies.
+- Commit everything and run the test command before reporting READY.
+- Report only via: {{SKILL_DIR}}/scripts/hierarchy.sh report READY|QUESTION|BLOCKED|PROGRESS "<text>"
+- After READY, stop and wait. The lead accepts a specific commit; new commits invalidate it.
 
 TASK
 ----

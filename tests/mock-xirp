@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Minimal stand-in for the xirp CLI, enough for hierarchy.sh tests.
+# Sessions are JSON files in $MOCK_DIR/sessions. If $MOCK_REPO is set, `session new
+# --new-branch` creates a real git worktree so git checks run for real.
+set -euo pipefail
+: "${MOCK_DIR:?MOCK_DIR not set}"
+mkdir -p "$MOCK_DIR/sessions"
+S="$MOCK_DIR/sessions"
+log() { printf '%s\n' "$*" >>"$MOCK_DIR/calls.log"; }
+find_session() { local f; for f in "$S/$1"*.json; do [[ -f "$f" ]] && { echo "$f"; return; }; done; return 1; }
+
+[[ "${1:-}" == "session" ]] || { echo "mock-xirp: unsupported: $*" >&2; exit 2; }
+sub="$2"; shift 2
+log "session $sub $*"
+case "$sub" in
+  new)
+    name="" goal="" branch="" base="main" parent="" deps="" tags=()
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --name) name="$2"; shift 2;; --goal) goal="$2"; shift 2;;
+      --new-branch) branch="$2"; shift 2;; --base-branch) base="$2"; shift 2;;
+      --parent) parent="$2"; shift 2;; --depends-on) deps="$2"; shift 2;;
+      --tag) tags+=("$2"); shift 2;; --json) shift;; *) shift;; esac; done
+    id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+    wt=""
+    if [[ -n "${MOCK_REPO:-}" && -n "$branch" ]]; then
+      wt="$MOCK_DIR/wt/$id"; mkdir -p "$MOCK_DIR/wt"
+      git -C "$MOCK_REPO" worktree add -q -b "$branch" "$wt" "$base" >/dev/null 2>&1
+    fi
+    jq -n --arg id "$id" --arg name "$name" --arg goal "$goal" --arg branch "$branch" --arg wt "$wt" \
+          --arg parent "$parent" --arg deps "$deps" --argjson tags "$(printf '%s\n' "${tags[@]+"${tags[@]}"}" | jq -R . | jq -s 'map(select(.!=""))')" \
+      '{id:$id, name:$name, goal:$goal, branch:$branch, worktreePath:(if $wt=="" then null else $wt end),
+        parentSessionId:(if $parent=="" then null else $parent end), dependsOnSessionIds:(if $deps=="" then [] else [$deps] end),
+        tags:$tags, status:"running", totalCostUsd:0}' >"$S/$id.json"
+    jq -c '{id}' "$S/$id.json";;
+  get)
+    f="$(find_session "$1")" || { echo "session not found: $1" >&2; exit 1; }
+    cat "$f";;
+  message)
+    printf '%s\t%s\t%s\n' "$1" "${4:-}" "$2" >>"$MOCK_DIR/messages.log";;
+  update)
+    f="$(find_session "$1")"; tmp="$(mktemp)"; jq --arg n "$3" '.name=$n' "$f" >"$tmp" && mv "$tmp" "$f";;
+  stop)
+    f="$(find_session "$1")" || exit 1; tmp="$(mktemp)"; jq '.status="stopped"' "$f" >"$tmp" && mv "$tmp" "$f";;
+  delete)
+    id="$1"; f="$(find_session "$id")" || exit 1
+    wt="$(jq -r '.worktreePath // empty' "$f")"; br="$(jq -r '.branch // empty' "$f")"
+    if [[ " $* " == *" --delete-worktree "* && -n "$wt" ]]; then git -C "$MOCK_REPO" worktree remove "$wt" || exit 1; fi
+    if [[ " $* " == *" --delete-branch "* && -n "$br" ]]; then git -C "$MOCK_REPO" branch -D "$br" >/dev/null || exit 1; fi
+    rm -f "$f";;
+  *) echo "mock-xirp: unsupported session $sub" >&2; exit 2;;
+esac
